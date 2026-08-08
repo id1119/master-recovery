@@ -1,0 +1,13 @@
+[package]
+name = "gp-ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gp-sim = { path = "../gp-sim" }
+gp-transport = { path = "../gp-transport" }
+serde.workspace = true
+
+[lints]
+workspace = true

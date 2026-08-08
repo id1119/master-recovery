@@ -1,0 +1,17 @@
+[package]
+name = "gp-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+gp-gui-sim = { path = "../gp-gui-sim" }
+gp-sim = { path = "../gp-sim" }
+gp-types = { path = "../gp-types" }
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

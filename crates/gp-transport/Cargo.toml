@@ -1,0 +1,16 @@
+[package]
+name = "gp-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gp-crypto = { path = "../gp-crypto" }
+gp-types = { path = "../gp-types" }
+rand.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
+

@@ -1,0 +1,622 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Guardian Recovery Studio</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #071019;
+      --surface: #0d1a25;
+      --surface-2: #122431;
+      --surface-3: #172d3b;
+      --border: #284353;
+      --text: #edf6fa;
+      --muted: #94aebc;
+      --teal: #62e0c1;
+      --blue: #74adff;
+      --amber: #ffd166;
+      --red: #ff7272;
+      --violet: #bd9dff;
+      --shadow: 0 18px 50px rgb(0 0 0 / 28%);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 12% -10%, #17415b 0, transparent 34%),
+        radial-gradient(circle at 90% 0%, #242450 0, transparent 28%),
+        var(--bg);
+      color: var(--text);
+      font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+    }
+    button, input, select, textarea { font: inherit; }
+    button { color: inherit; }
+    .app { max-width: 1580px; margin: 0 auto; padding: 22px; }
+    .topbar { display: flex; justify-content: space-between; gap: 24px; align-items: center; margin-bottom: 18px; }
+    .brand { display: flex; gap: 13px; align-items: center; }
+    .logo { width: 46px; height: 46px; display: grid; place-items: center; border-radius: 14px; background: linear-gradient(145deg, var(--teal), #3b9eeb); color: #061716; font-weight: 950; box-shadow: 0 10px 30px #55d6be33; }
+    .eyebrow { color: var(--teal); font-size: 11px; text-transform: uppercase; letter-spacing: .14em; font-weight: 850; }
+    h1 { font-size: 25px; letter-spacing: -.035em; margin: 2px 0 0; }
+    .honesty { max-width: 520px; padding: 10px 13px; color: var(--amber); background: #302711b8; border: 1px solid #665425; border-radius: 10px; font-size: 12px; }
+
+    .preset-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+    .preset { text-align: left; padding: 13px; border: 1px solid var(--border); border-radius: 12px; background: linear-gradient(180deg, #122532, #0d1a25); cursor: pointer; transition: .18s ease; }
+    .preset:hover, .preset.selected { border-color: var(--teal); transform: translateY(-1px); box-shadow: 0 0 0 3px #62e0c119; }
+    .preset strong { display: block; margin-bottom: 3px; }
+    .preset span { color: var(--muted); font-size: 12px; }
+
+    .layout { display: grid; grid-template-columns: 355px minmax(0, 1fr); gap: 16px; align-items: start; }
+    .card { background: linear-gradient(180deg, rgb(17 34 46 / 96%), rgb(10 22 31 / 97%)); border: 1px solid var(--border); border-radius: 15px; box-shadow: var(--shadow); }
+    .sidebar { position: sticky; top: 14px; overflow: hidden; }
+    .side-head { padding: 16px; border-bottom: 1px solid var(--border); }
+    .side-head h2 { margin: 0 0 4px; font-size: 16px; }
+    .side-head p { margin: 0; color: var(--muted); font-size: 12px; }
+    .config-section { padding: 15px 16px; border-bottom: 1px solid #203b4c; }
+    .section-title { display: flex; align-items: center; gap: 8px; margin-bottom: 11px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #c6dbe5; font-weight: 800; }
+    .number { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: #193b47; color: var(--teal); font-size: 11px; }
+    label { display: block; margin-bottom: 9px; color: var(--muted); font-size: 12px; }
+    label > span, .label-row { display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-bottom: 5px; }
+    input, select, textarea { width: 100%; border: 1px solid #2a485a; border-radius: 9px; background: #07141d; color: var(--text); padding: 9px 10px; outline: none; }
+    input:focus, select:focus, textarea:focus { border-color: var(--teal); box-shadow: 0 0 0 3px #62e0c118; }
+    textarea { min-height: 84px; resize: vertical; }
+    .paired { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .file-row { display: flex; gap: 8px; align-items: center; }
+    .file-button { flex: 0 0 auto; padding: 8px 10px; border: 1px solid #315467; border-radius: 8px; background: #132a38; cursor: pointer; }
+    .file-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
+    .file-clear { display: none; flex: 0 0 auto; border: 0; background: transparent; color: #ffaaa2; cursor: pointer; font-size: 12px; }
+    .file-clear.show { display: inline; }
+    #fileInput { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+    details { border-top: 1px solid #203b4c; }
+    details summary { cursor: pointer; padding: 14px 16px; font-weight: 750; color: #d1e1e9; }
+    details .config-section { border: 0; padding-top: 0; }
+    .mode-control { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; padding: 4px; background: #07141d; border: 1px solid #294757; border-radius: 10px; }
+    .mode-control button { border: 0; border-radius: 7px; background: transparent; color: var(--muted); padding: 7px 4px; cursor: pointer; font-size: 11px; font-weight: 800; }
+    .mode-control button.selected { background: #1b3a48; color: var(--teal); }
+    .range-row { display: grid; grid-template-columns: 1fr 52px; gap: 8px; align-items: center; }
+    input[type="range"] { padding: 0; accent-color: var(--teal); }
+    .unit { color: var(--muted); font-size: 10px; }
+    .error { display: none; margin: 12px 16px 0; padding: 10px; color: #ffd6d6; background: #3b171c; border: 1px solid #7a3038; border-radius: 9px; font-size: 12px; }
+    .error.show { display: block; }
+    .primary { width: calc(100% - 32px); margin: 13px 16px 16px; padding: 12px 14px; border: 0; border-radius: 10px; background: linear-gradient(135deg, var(--teal), #5bb2ff); color: #061916; font-weight: 900; cursor: pointer; }
+    .primary:disabled { opacity: .55; cursor: wait; }
+
+    .workspace { min-width: 0; }
+    .result-head { padding: 17px; display: flex; justify-content: space-between; align-items: center; gap: 15px; margin-bottom: 12px; }
+    .result-title { display: flex; align-items: center; gap: 10px; }
+    .state-dot { width: 11px; height: 11px; border-radius: 50%; background: var(--muted); box-shadow: 0 0 0 5px #94aebc18; }
+    .state-dot.running { background: var(--blue); box-shadow: 0 0 0 5px #74adff20; }
+    .state-dot.success { background: var(--teal); box-shadow: 0 0 0 5px #62e0c120; }
+    .state-dot.cancelled { background: var(--red); box-shadow: 0 0 0 5px #ff727220; }
+    .result-head h2 { margin: 0; font-size: 16px; }
+    .result-head p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+    .state-pill { padding: 6px 10px; border-radius: 999px; background: var(--surface-3); color: var(--blue); font-weight: 850; font-size: 11px; }
+
+    .walkthrough { padding: 16px; margin-bottom: 12px; }
+    .steps { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0; margin-bottom: 16px; }
+    .step { position: relative; text-align: center; color: #668392; font-size: 10px; font-weight: 800; text-transform: uppercase; }
+    .step::before { content: ""; position: absolute; top: 11px; left: 0; right: 0; height: 2px; background: #234151; z-index: 0; }
+    .step:first-child::before { left: 50%; }
+    .step:last-child::before { right: 50%; }
+    .step i { position: relative; z-index: 1; display: grid; place-items: center; width: 24px; height: 24px; margin: 0 auto 5px; border-radius: 50%; border: 2px solid #315161; background: var(--surface); font-style: normal; }
+    .step.current { color: var(--blue); }
+    .step.current i { border-color: var(--blue); box-shadow: 0 0 0 5px #74adff18; }
+    .step.done { color: var(--teal); }
+    .step.done i { background: var(--teal); border-color: var(--teal); color: #061916; }
+
+    .actor-map { display: grid; grid-template-columns: repeat(7, 1fr); gap: 7px; margin-bottom: 14px; }
+    .actor-node { min-height: 76px; padding: 9px 6px; border: 1px solid #294858; border-radius: 10px; background: #0a1821; text-align: center; transition: .2s ease; }
+    .actor-node.active { border-color: var(--teal); background: #102b31; transform: translateY(-2px); box-shadow: 0 0 24px #62e0c122; }
+    .actor-icon { display: grid; place-items: center; width: 28px; height: 28px; margin: 0 auto 5px; border-radius: 9px; background: #193241; color: var(--blue); font-weight: 900; }
+    .actor-node b { display: block; font-size: 11px; }
+    .actor-node small { color: var(--muted); font-size: 9px; }
+    .event-focus { display: grid; grid-template-columns: minmax(0, 1fr) 250px; gap: 12px; }
+    .event-card, .crypto-card { padding: 14px; border: 1px solid #264353; border-radius: 11px; background: #091721; }
+    .event-kicker { color: var(--teal); text-transform: uppercase; letter-spacing: .1em; font-size: 10px; font-weight: 850; }
+    .event-card h3 { margin: 5px 0; font-size: 17px; }
+    .event-card p { margin: 0; color: #bdd0d9; }
+    .crypto-card b { display: block; color: var(--violet); margin-bottom: 5px; }
+    .crypto-card p { margin: 0; color: var(--muted); font-size: 11px; }
+    .playback { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 13px; }
+    .playback-controls { display: flex; gap: 7px; }
+    .secondary { border: 1px solid #315365; border-radius: 8px; background: #132936; padding: 7px 10px; cursor: pointer; }
+    .secondary:hover { border-color: var(--blue); }
+    .counter { color: var(--muted); font-size: 11px; }
+
+    .detail-grid { display: grid; grid-template-columns: 1.25fr .9fr; gap: 12px; margin-bottom: 12px; }
+    .panel { padding: 16px; }
+    .panel-head { display: flex; justify-content: space-between; align-items: start; gap: 10px; margin-bottom: 12px; }
+    .panel h3 { margin: 0; font-size: 14px; }
+    .panel-sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+    .metrics { display: grid; grid-template-columns: repeat(5, 1fr); gap: 7px; }
+    .metric { padding: 9px; background: #08151e; border: 1px solid #203d4d; border-radius: 9px; }
+    .metric strong { display: block; font-size: 18px; }
+    .metric span { color: var(--muted); font-size: 9px; text-transform: uppercase; }
+    .packet-chart { height: 105px; display: flex; align-items: end; gap: 2px; margin: 12px 0; padding: 7px 0; border-bottom: 1px solid #294858; overflow: hidden; }
+    .packet { flex: 1; min-width: 2px; max-width: 8px; border-radius: 3px 3px 0 0; background: var(--violet); opacity: .65; }
+    .leakage { padding: 10px; border-radius: 9px; border: 1px solid #6a5625; background: #30271185; color: var(--amber); font-size: 11px; }
+    .party-grid { display: grid; gap: 7px; }
+    .party { display: grid; grid-template-columns: 95px 1fr; gap: 8px; padding: 8px; border: 1px solid #213e4e; border-radius: 8px; background: #08151e; font-size: 11px; }
+    .party b { color: var(--blue); }
+    .party span { color: var(--muted); }
+    .artifact-list { display: grid; gap: 8px; }
+    .artifact { padding: 10px; border: 1px solid #244252; border-radius: 9px; background: #08151e; }
+    .artifact-top { display: flex; justify-content: space-between; gap: 8px; }
+    .artifact b { font-size: 11px; }
+    .artifact p { margin: 4px 0 0; color: var(--muted); font-size: 10px; word-break: break-all; }
+    .visibility { padding: 3px 6px; border-radius: 999px; background: #17313c; color: var(--teal); font-size: 9px; }
+    .visibility.private { color: var(--violet); }
+    .output { margin-top: 10px; padding: 11px; min-height: 48px; border: 1px dashed #34705f; border-radius: 9px; background: #0b2821; color: var(--teal); white-space: pre-wrap; word-break: break-word; }
+    .download { display: none; margin-top: 8px; }
+
+    .compare { display: none; margin-bottom: 12px; padding: 16px; }
+    .compare.show { display: block; }
+    .compare-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; }
+    .compare-mode { padding: 12px; border: 1px solid #294858; border-radius: 10px; background: #08151e; }
+    .compare-mode strong { color: var(--blue); }
+    .compare-mode .big { font-size: 21px; display: block; margin: 5px 0; }
+    .compare-mode p { color: var(--muted); font-size: 10px; margin: 0; }
+
+    .actor-detail { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+    .mini-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(52px, 1fr)); gap: 6px; }
+    .mini-node { padding: 7px 4px; border: 1px solid #294858; border-radius: 8px; background: #08151e; text-align: center; font-size: 10px; }
+    .mini-node.offline { border-color: #8a6926; color: var(--amber); }
+    .mini-node.rejected { border-color: #8c343d; color: var(--red); }
+    .mini-node.valid { border-color: #34705f; color: var(--teal); }
+
+    .log { max-height: 250px; overflow: auto; }
+    .log-row { display: grid; grid-template-columns: 58px 100px 1fr; gap: 8px; padding: 7px 0; border-bottom: 1px solid #183342; font-size: 11px; }
+    .log-row .phase { color: var(--teal); font-weight: 800; }
+    .log-row .who { color: var(--blue); }
+    .log-row .what { color: #bed1da; }
+    .empty { padding: 35px 10px; text-align: center; color: var(--muted); }
+    .footer-note { color: var(--muted); font-size: 11px; text-align: center; margin: 16px 0 4px; }
+
+    @media (max-width: 1120px) {
+      .layout { grid-template-columns: 310px minmax(0, 1fr); }
+      .actor-map { grid-template-columns: repeat(4, 1fr); }
+      .detail-grid, .actor-detail { grid-template-columns: 1fr; }
+      .metrics { grid-template-columns: repeat(3, 1fr); }
+    }
+    @media (max-width: 820px) {
+      .app { padding: 12px; }
+      .topbar { align-items: start; flex-direction: column; }
+      .preset-row { grid-template-columns: 1fr 1fr; }
+      .layout { grid-template-columns: 1fr; }
+      .sidebar { position: static; }
+      .event-focus { grid-template-columns: 1fr; }
+      .steps { overflow-x: auto; }
+      .step { min-width: 76px; }
+      .compare-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">GP</div>
+        <div>
+          <div class="eyebrow">Interactive recovery walkthrough</div>
+          <h1>Guardian Recovery Studio</h1>
+        </div>
+      </div>
+      <div class="honesty">Post-quantum-skewed, not fully post-quantum: X-Wing protects transport, while Ed25519 is classical. Metadata protection is simulated—not a production anonymity network.</div>
+    </header>
+
+    <nav class="preset-row" aria-label="Demo scenarios">
+      <button class="preset selected" data-preset="standard"><strong>1. Standard recovery</strong><span>Two signers approve; one signer is offline.</span></button>
+      <button class="preset" data-preset="failure"><strong>2. Guardian failure</strong><span>One corrupt and one offline guardian are replaced.</span></button>
+      <button class="preset" data-preset="cancel"><strong>3. Cancellation race</strong><span>Cancel just before release; honest guardians refuse.</span></button>
+      <button class="preset" data-preset="compare"><strong>4. Compare metadata</strong><span>Replay the same seed in OFF, BASIC, and STRONG.</span></button>
+    </nav>
+
+    <div class="layout">
+      <aside class="card sidebar">
+        <div class="side-head">
+          <h2>Configure the demo</h2>
+          <p>Defaults match the four-minute presentation path.</p>
+        </div>
+
+        <section class="config-section">
+          <div class="section-title"><span class="number">1</span> Secret to protect</div>
+          <label for="secretInput"><span>Text secret <small>owner device only</small></span><textarea id="secretInput">correct horse battery staple</textarea></label>
+          <div class="file-row">
+            <label class="file-button" for="fileInput">Choose a small file</label>
+            <input id="fileInput" type="file">
+            <span class="file-name" id="fileName">No file selected · max 700 KiB</span>
+            <button class="file-clear" id="clearFileButton" type="button" aria-label="Remove selected file">Remove</button>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <div class="section-title"><span class="number">2</span> Authorization signers</div>
+          <div class="paired">
+            <label for="signerCount"><span>Count</span><input id="signerCount" type="number" min="1" max="20" value="3"></label>
+            <label for="signerThreshold"><span>Approval threshold</span><input id="signerThreshold" type="number" min="1" max="20" value="2"></label>
+          </div>
+          <div class="paired">
+            <label for="cancelThreshold"><span>Cancel threshold</span><input id="cancelThreshold" type="number" min="1" max="20" value="2"></label>
+            <label for="offlineSigner"><span>Offline signer</span><select id="offlineSigner"></select></label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <div class="section-title"><span class="number">3</span> Storage guardians</div>
+          <div class="paired">
+            <label for="guardianCount"><span>Count</span><input id="guardianCount" type="number" min="1" max="32" value="8"></label>
+            <label for="guardianThreshold"><span>Recovery threshold</span><input id="guardianThreshold" type="number" min="1" max="32" value="5"></label>
+          </div>
+          <div class="paired">
+            <label for="offlineGuardian"><span>Offline guardian</span><select id="offlineGuardian"></select></label>
+            <label for="corruptGuardian"><span>Corrupt response</span><select id="corruptGuardian"></select></label>
+          </div>
+        </section>
+
+        <section class="config-section">
+          <div class="section-title"><span class="number">4</span> Recovery path</div>
+          <label><span>Outcome</span><select id="recoveryOutcome"><option value="release">Complete recovery after delay</option><option value="cancel">Cancel before release</option></select></label>
+          <label for="delaySeconds"><span>Compressed 24-hour delay <output id="delayOutput">5 s</output></span><input id="delaySeconds" type="range" min="0" max="30" value="5"></label>
+        </section>
+
+        <details>
+          <summary>Network &amp; metadata options</summary>
+          <section class="config-section">
+            <label><span>Metadata mode</span><div class="mode-control" id="metadataMode"><button type="button" data-mode="off">OFF</button><button type="button" data-mode="basic">BASIC</button><button type="button" class="selected" data-mode="strong">STRONG</button></div></label>
+            <div class="paired">
+              <label for="latencyMs"><span>Latency <output id="latencyOutput">120 ms</output></span><input id="latencyMs" type="range" min="1" max="1000" value="120"></label>
+              <label for="coverRate"><span>Cover rate</span><input id="coverRate" type="number" min="0" max="100" value="3"></label>
+            </div>
+            <div class="paired">
+              <label for="packetLoss"><span>Packet loss %</span><input id="packetLoss" type="number" min="0" max="100" value="0"></label>
+              <label for="packetDuplication"><span>Duplication %</span><input id="packetDuplication" type="number" min="0" max="100" value="0"></label>
+            </div>
+            <div class="paired">
+              <label for="mixDrop"><span>Mix drop %</span><input id="mixDrop" type="number" min="0" max="100" value="0"></label>
+              <label for="replaySeed"><span>Replay seed</span><input id="replaySeed" type="number" min="0" value="424242"></label>
+            </div>
+            <p class="unit">Fault controls shape the observer's packet trace. Protocol delivery retries are abstracted by this deterministic simulator.</p>
+          </section>
+        </details>
+
+        <div class="error" id="validationError" role="alert"></div>
+        <button class="primary" id="runButton">Run guided recovery</button>
+      </aside>
+
+      <section class="workspace">
+        <div class="card result-head">
+          <div class="result-title">
+            <span class="state-dot" id="stateDot"></span>
+            <div><h2 id="resultTitle">Ready to protect a secret</h2><p id="resultSubtitle">Choose a scenario or adjust the options, then run the guided recovery.</p></div>
+          </div>
+          <span class="state-pill" id="statePill">READY</span>
+        </div>
+
+        <section class="card walkthrough">
+          <div class="steps" id="guidedSteps">
+            <div class="step" data-step="0"><i>1</i>Setup</div>
+            <div class="step" data-step="1"><i>2</i>Approve</div>
+            <div class="step" data-step="2"><i>3</i>Delay</div>
+            <div class="step" data-step="3"><i>4</i>Release / cancel</div>
+            <div class="step" data-step="4"><i>5</i>Reconstruct</div>
+            <div class="step" data-step="5"><i>6</i>Rotate</div>
+          </div>
+
+          <div class="actor-map" id="actorMap">
+            <div class="actor-node" data-actor="owner"><span class="actor-icon">O</span><b>Owner</b><small>setup only</small></div>
+            <div class="actor-node" data-actor="signers"><span class="actor-icon">S</span><b>Signers</b><small id="signerSummary">2 of 3</small></div>
+            <div class="actor-node" data-actor="config-store"><span class="actor-icon">C</span><b>Config store</b><small>no roster</small></div>
+            <div class="actor-node" data-actor="mix"><span class="actor-icon">M</span><b>Mix relays</b><small>opaque cells</small></div>
+            <div class="actor-node" data-actor="guardians"><span class="actor-icon">G</span><b>Guardians</b><small id="guardianSummary">5 of 8</small></div>
+            <div class="actor-node" data-actor="fresh-client"><span class="actor-icon">R</span><b>Recovery client</b><small>fresh recipient</small></div>
+            <div class="actor-node" data-actor="observer"><span class="actor-icon">W</span><b>Observer</b><small>metadata only</small></div>
+          </div>
+
+          <div class="event-focus">
+            <div class="event-card">
+              <div class="event-kicker" id="eventPhase">Waiting</div>
+              <h3 id="eventTitle">The walkthrough will explain every security-critical transition.</h3>
+              <p id="eventMessage">Nothing has been sent yet.</p>
+            </div>
+            <div class="crypto-card"><b id="cryptoTitle">What is protected?</b><p id="cryptoMessage">Plaintext remains on the owner device until you start setup.</p></div>
+          </div>
+          <div class="playback">
+            <div class="playback-controls"><button class="secondary" id="previousButton">← Previous</button><button class="secondary" id="playButton">▶ Play</button><button class="secondary" id="nextButton">Next →</button></div>
+            <span class="counter" id="eventCounter">0 / 0 events</span>
+          </div>
+        </section>
+
+        <section class="actor-detail">
+          <div class="card panel"><div class="panel-head"><div><h3>Signer availability</h3><div class="panel-sub">A shares are encrypted to the exact fresh recovery recipient.</div></div></div><div class="mini-grid" id="signerGrid"></div></div>
+          <div class="card panel"><div class="panel-head"><div><h3>Guardian contributions</h3><div class="panel-sub">Invalid responses become erasures and replacements are requested.</div></div></div><div class="mini-grid" id="guardianGrid"></div></div>
+        </section>
+
+        <section class="detail-grid">
+          <div class="card panel">
+            <div class="panel-head"><div><h3>Passive observer view</h3><div class="panel-sub">The observer never receives the simulator's real/dummy classification bit.</div></div><button class="secondary" id="compareButton">Compare all modes</button></div>
+            <div class="metrics"><div class="metric"><strong id="observedMetric">0</strong><span>Observed</span></div><div class="metric"><strong id="coverMetric">0</strong><span>Cover</span></div><div class="metric"><strong id="droppedMetric">0</strong><span>Dropped</span></div><div class="metric"><strong id="duplicatedMetric">0</strong><span>Duplicated</span></div><div class="metric"><strong id="bucketMetric">—</strong><span>Size bucket</span></div></div>
+            <div class="packet-chart" id="packetChart"><div class="empty">Packet trace appears after a run.</div></div>
+            <div class="leakage" id="leakageText">Remaining leakage will be stated here—never “the observer learns nothing.”</div>
+          </div>
+          <div class="card panel">
+            <div class="panel-head"><div><h3>Who learns what</h3><div class="panel-sub">Unavoidable endpoint knowledge stays visible.</div></div></div>
+            <div class="party-grid"><div class="party"><b>Signer</b><span>Knows it approved some pseudonymous recovery; not the guardian roster.</span></div><div class="party"><b>Guardian</b><span>Knows an opaque slot was accessed; not the owner identity or full roster.</span></div><div class="party"><b>Mix hop</b><span>Sees adjacent-hop timing and volume only.</span></div><div class="party"><b>Recovery client</b><span>Learns the roster after A, then reconstructs plaintext locally.</span></div></div>
+          </div>
+        </section>
+
+        <section class="card compare" id="comparisonPanel"><div class="panel-head"><div><h3>Same-seed metadata comparison</h3><div class="panel-sub">Only the transport mode changes.</div></div></div><div class="compare-grid" id="comparisonGrid"></div></section>
+
+        <section class="detail-grid">
+          <div class="card panel">
+            <div class="panel-head"><div><h3>Recovery artifacts</h3><div class="panel-sub">What is public, sensitive, or private.</div></div></div>
+            <div class="artifact-list">
+              <div class="artifact"><div class="artifact-top"><b>Recovery Card</b><span class="visibility">privacy-sensitive</span></div><p id="cardArtifact">Config locator + opaque signer mailboxes. No key material or guardian roster.</p></div>
+              <div class="artifact"><div class="artifact-top"><b>Config Capsule</b><span class="visibility">pseudonymous</span></div><p id="configArtifact">Available after setup.</p></div>
+              <div class="artifact"><div class="artifact-top"><b>Recovery Descriptor</b><span class="visibility private">sealed under A</span></div><p id="descriptorArtifact">Guardian roster remains hidden until signer-threshold authorization.</p></div>
+            </div>
+          </div>
+          <div class="card panel">
+            <div class="panel-head"><div><h3>Client-only output</h3><div class="panel-sub">Plaintext is never displayed at signers, guardians, relays, or the config store.</div></div></div>
+            <div class="output" id="recoveredOutput">No plaintext recovered.</div>
+            <button class="secondary download" id="downloadButton">Download recovered file</button>
+          </div>
+        </section>
+
+        <details class="card">
+          <summary>Complete protocol event log</summary>
+          <div class="panel log" id="eventLog"><div class="empty">Run a scenario to create a deterministic event log.</div></div>
+        </details>
+      </section>
+    </div>
+    <p class="footer-note">Working hackathon prototype. Real cryptography and state-machine checks; simulated anonymity transport; no claim of perfect anonymity or a cryptographic wall-clock timelock.</p>
+  </main>
+
+  <script>
+    const byId = id => document.getElementById(id);
+    let selectedMode = 'strong';
+    let latestResult = null;
+    let eventCursor = -1;
+    let playTimer = null;
+    let fileSecret = null;
+    let textSecretBeforeFile = '';
+
+    const phaseInfo = {
+      SETUP: ['Setup protects the secret', 'The owner creates independent A and DEK values. The secret is encrypted before erasure coding.'],
+      RECOVERY: ['Signers authorize one recipient', 'Approvals and encrypted A shares bind to the complete request and fresh X-Wing recipient key.'],
+      DELAY: ['Guardians enforce the delay', 'Each honest guardian records its own monotonic not-before time and fails closed on ambiguity.'],
+      RELEASE: ['Release requires a second signer phase', 'Guardians verify a fresh certificate, exact request digest, local delay, and cancellation state.'],
+      CANCEL: ['Cancellation permanently wins', 'A threshold-valid cancellation kills this request for every honest guardian that observes it.'],
+      COMPLETE: ['Reconstruction happens locally', 'The client unwraps DEK shares with A, reconstructs DEK and ciphertext, then decrypts the secret.'],
+      ROTATE: ['Old recovery state is retired', 'Fresh A, DEK, shares, fragments, commitments, and opaque slots create configuration version 2.']
+    };
+
+    function numberValue(id) { return Number(byId(id).value); }
+    function option(label, value) { const node = document.createElement('option'); node.textContent = label; node.value = String(value); return node; }
+
+    function fillActorSelect(id, count, preferred, noun) {
+      const select = byId(id);
+      const previous = preferred ?? Number(select.value || 0);
+      select.replaceChildren(option('None', 0));
+      for (let index = 1; index <= count; index++) select.appendChild(option(`${noun} ${index}`, index));
+      select.value = String(previous <= count ? previous : 0);
+    }
+
+    function syncActorControls(preferred = {}) {
+      const signers = Math.max(1, numberValue('signerCount'));
+      const guardians = Math.max(1, numberValue('guardianCount'));
+      byId('signerThreshold').max = signers;
+      byId('cancelThreshold').max = signers;
+      byId('guardianThreshold').max = guardians;
+      fillActorSelect('offlineSigner', signers, preferred.offlineSigner, 'Signer');
+      fillActorSelect('offlineGuardian', guardians, preferred.offlineGuardian, 'Guardian');
+      fillActorSelect('corruptGuardian', guardians, preferred.corruptGuardian, 'Guardian');
+      byId('signerSummary').textContent = `${numberValue('signerThreshold')} of ${signers}`;
+      byId('guardianSummary').textContent = `${numberValue('guardianThreshold')} of ${guardians}`;
+      renderActorGrids();
+    }
+
+    function renderActorGrids() {
+      const signerGrid = byId('signerGrid');
+      const guardianGrid = byId('guardianGrid');
+      signerGrid.replaceChildren(); guardianGrid.replaceChildren();
+      const offlineSigner = numberValue('offlineSigner');
+      for (let i = 1; i <= numberValue('signerCount'); i++) {
+        const node = document.createElement('div'); node.className = `mini-node${i === offlineSigner ? ' offline' : ''}`; node.textContent = `S${i}${i === offlineSigner ? ' · offline' : ''}`; signerGrid.appendChild(node);
+      }
+      const offlineGuardian = numberValue('offlineGuardian');
+      const corruptGuardian = numberValue('corruptGuardian');
+      for (let i = 1; i <= numberValue('guardianCount'); i++) {
+        const rejected = latestResult?.rejected_guardians?.includes(i);
+        const valid = latestResult && !rejected && eventCursor >= releaseEventIndex();
+        const state = i === offlineGuardian ? 'offline' : i === corruptGuardian ? 'corrupt' : rejected ? 'rejected' : valid ? 'valid' : '';
+        const node = document.createElement('div'); node.className = `mini-node${state === 'offline' ? ' offline' : state === 'corrupt' || state === 'rejected' ? ' rejected' : state === 'valid' ? ' valid' : ''}`; node.textContent = `G${i}${state ? ` · ${state}` : ''}`; guardianGrid.appendChild(node);
+      }
+    }
+
+    function validateOptions(show = true) {
+      const errors = [];
+      const signerCount = numberValue('signerCount');
+      const signerThreshold = numberValue('signerThreshold');
+      const cancelThreshold = numberValue('cancelThreshold');
+      const guardianCount = numberValue('guardianCount');
+      const guardianThreshold = numberValue('guardianThreshold');
+      const offlineSigner = numberValue('offlineSigner');
+      const offlineGuardian = numberValue('offlineGuardian');
+      const corruptGuardian = numberValue('corruptGuardian');
+      if (!fileSecret && !byId('secretInput').value.length) errors.push('Enter a secret or choose a small file.');
+      if (signerCount < 1 || signerCount > 20) errors.push('Signer count must be between 1 and 20.');
+      if (signerThreshold < 1 || signerThreshold > signerCount) errors.push('Approval threshold cannot exceed signer count.');
+      if (cancelThreshold < 1 || cancelThreshold > signerCount) errors.push('Cancellation threshold cannot exceed signer count.');
+      if (signerCount - (offlineSigner ? 1 : 0) < signerThreshold) errors.push('Not enough online signers remain to approve recovery.');
+      if (byId('recoveryOutcome').value === 'cancel' && signerCount - (offlineSigner ? 1 : 0) < cancelThreshold) errors.push('Not enough online signers remain to cancel recovery.');
+      if (guardianCount < 1 || guardianCount > 32) errors.push('Guardian count must be between 1 and 32.');
+      if (guardianThreshold < 1 || guardianThreshold > guardianCount) errors.push('Recovery threshold cannot exceed guardian count.');
+      const failedGuardians = new Set([offlineGuardian, corruptGuardian].filter(Boolean)).size;
+      if (guardianCount - failedGuardians < guardianThreshold) errors.push('Not enough valid guardians remain to reconstruct the secret.');
+      for (const id of ['packetLoss', 'packetDuplication', 'mixDrop']) if (numberValue(id) < 0 || numberValue(id) > 100) errors.push('Network percentages must be between 0 and 100.');
+      const box = byId('validationError'); box.textContent = errors.join(' '); box.classList.toggle('show', show && errors.length > 0);
+      return errors;
+    }
+
+    function collectOptions(mode = selectedMode) {
+      return {
+        seed: numberValue('replaySeed'), mode,
+        secret: fileSecret || byId('secretInput').value,
+        offline_signer: numberValue('offlineSigner') || null,
+        offline_guardian: numberValue('offlineGuardian') || null,
+        corrupt_guardian: numberValue('corruptGuardian') || null,
+        cancel_before_release: byId('recoveryOutcome').value === 'cancel',
+        simulated_delay_secs: numberValue('delaySeconds'),
+        signer_count: numberValue('signerCount'), signer_threshold: numberValue('signerThreshold'), cancellation_threshold: numberValue('cancelThreshold'),
+        guardian_count: numberValue('guardianCount'), guardian_threshold: numberValue('guardianThreshold'),
+        network_latency_ms: numberValue('latencyMs'), packet_loss_percent: numberValue('packetLoss'), packet_duplication_percent: numberValue('packetDuplication'), mix_drop_percent: numberValue('mixDrop'), cover_rate: numberValue('coverRate')
+      };
+    }
+
+    async function requestDemo(options) {
+      const response = await fetch('/api/demo', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(options) });
+      if (!response.ok) throw new Error(`Server returned HTTP ${response.status}.`);
+      const body = await response.json();
+      if (body.Error) throw new Error(body.Error.message);
+      if (!body.Snapshot) throw new Error('The simulator returned an unexpected response.');
+      return body.Snapshot.result;
+    }
+
+    async function runScenario() {
+      if (validateOptions().length) return;
+      stopPlayback();
+      const button = byId('runButton'); button.disabled = true; button.textContent = 'Running cryptographic checks…';
+      setHeader('running', 'Running deterministic recovery', 'Generating real shares, ciphertext, certificates, and proofs.', 'RUNNING');
+      try {
+        latestResult = await requestDemo(collectOptions());
+        eventCursor = 0;
+        renderResult();
+        startPlayback();
+      } catch (error) {
+        showError(error.message);
+        setHeader('cancelled', 'The scenario could not run', error.message, 'ERROR');
+      } finally {
+        button.disabled = false; button.textContent = 'Run guided recovery';
+      }
+    }
+
+    function setHeader(kind, title, subtitle, state) {
+      byId('stateDot').className = `state-dot ${kind || ''}`; byId('resultTitle').textContent = title; byId('resultSubtitle').textContent = subtitle; byId('statePill').textContent = state;
+    }
+
+    function showError(message) { const box = byId('validationError'); box.textContent = message; box.classList.add('show'); }
+    function stopPlayback() { if (playTimer) clearInterval(playTimer); playTimer = null; byId('playButton').textContent = '▶ Play'; }
+    function startPlayback() { if (!latestResult || playTimer) return; byId('playButton').textContent = '❚❚ Pause'; playTimer = setInterval(() => { if (eventCursor >= latestResult.events.length - 1) { stopPlayback(); return; } eventCursor++; renderResult(); }, 700); }
+    function togglePlayback() { playTimer ? stopPlayback() : startPlayback(); }
+    function moveEvent(delta) { if (!latestResult) return; stopPlayback(); eventCursor = Math.max(0, Math.min(latestResult.events.length - 1, eventCursor + delta)); renderResult(); }
+
+    function phaseStep(phase) { return ({ SETUP: 0, RECOVERY: 1, DELAY: 2, RELEASE: 3, CANCEL: 3, COMPLETE: 4, ROTATE: 5 })[phase] ?? 0; }
+    function releaseEventIndex() { return latestResult ? latestResult.events.findIndex(event => event.phase === 'RELEASE') : Number.MAX_SAFE_INTEGER; }
+    function actorKey(actor) { if (actor.startsWith('guardian-') || actor === 'guardians') return 'guardians'; if (actor === 'signers') return 'signers'; return actor; }
+
+    function renderResult() {
+      if (!latestResult) return;
+      const event = latestResult.events[eventCursor];
+      const currentStep = phaseStep(event.phase);
+      document.querySelectorAll('.step').forEach(step => { const value = Number(step.dataset.step); step.classList.toggle('done', value < currentStep); step.classList.toggle('current', value === currentStep); step.querySelector('i').textContent = value < currentStep ? '✓' : String(value + 1); });
+      document.querySelectorAll('.actor-node').forEach(node => node.classList.toggle('active', node.dataset.actor === actorKey(event.actor)));
+      byId('eventPhase').textContent = event.phase; byId('eventTitle').textContent = phaseInfo[event.phase]?.[0] || event.actor; byId('eventMessage').textContent = event.message; byId('cryptoTitle').textContent = phaseInfo[event.phase]?.[0] || 'Protocol event'; byId('cryptoMessage').textContent = phaseInfo[event.phase]?.[1] || event.message; byId('eventCounter').textContent = `${eventCursor + 1} / ${latestResult.events.length} events`;
+      const currentState = [...latestResult.events.slice(0, eventCursor + 1)].reverse().find(item => item.state)?.state || 'Created';
+      const isFinal = eventCursor === latestResult.events.length - 1;
+      if (isFinal && latestResult.success) setHeader('success', 'Recovery completed safely', `${latestResult.valid_guardians} valid guardian contributions reconstructed the secret locally.`, currentState);
+      else if (isFinal && latestResult.cancelled) setHeader('cancelled', 'Recovery permanently cancelled', 'No honest guardian released material for this request.', currentState);
+      else setHeader('running', phaseInfo[event.phase]?.[0] || 'Recovery in progress', `Event ${eventCursor + 1} of ${latestResult.events.length}`, currentState);
+      renderActorGrids(); renderArtifacts(currentStep); renderObserver(); renderLog(); renderOutput(currentStep);
+    }
+
+    function renderArtifacts(step) {
+      byId('configArtifact').textContent = step >= 0 ? `config ${latestResult.config_id_hex.slice(0, 16)}… · version ${latestResult.rotated_config_version && step >= 5 ? latestResult.rotated_config_version : 1}` : 'Available after setup.';
+      byId('cardArtifact').textContent = `Config locator ${latestResult.config_id_hex.slice(0, 12)}… + opaque signer mailboxes. No key material or guardian roster.`;
+      byId('descriptorArtifact').textContent = step >= 1 ? 'Decrypted only inside the recovery client after reconstructing A; guardian routes are now client-local.' : 'Guardian roster remains hidden until signer-threshold authorization.';
+    }
+
+    function renderObserver() {
+      const observer = latestResult.observer;
+      byId('observedMetric').textContent = observer.total_observed_packets;
+      byId('coverMetric').textContent = observer.cover_packets;
+      byId('droppedMetric').textContent = observer.dropped_packets;
+      byId('duplicatedMetric').textContent = observer.duplicated_packets;
+      byId('bucketMetric').textContent = observer.packets[0] ? `${observer.packets[0].size_bucket} B` : '—';
+      byId('leakageText').textContent = observer.remaining_leakage;
+      const chart = byId('packetChart'); chart.replaceChildren();
+      if (!observer.packets.length) { const empty = document.createElement('div'); empty.className = 'empty'; empty.textContent = 'All simulated packets were dropped by the selected network settings.'; chart.appendChild(empty); return; }
+      observer.packets.slice(0, 120).forEach(packet => { const bar = document.createElement('div'); bar.className = 'packet'; bar.style.height = `${18 + packet.timestamp_ms % 78}px`; bar.style.background = latestResult.mode === 'strong' ? 'var(--violet)' : latestResult.mode === 'basic' ? 'var(--blue)' : 'var(--amber)'; bar.title = `t=${packet.timestamp_ms}ms · ${packet.size_bucket}B · ${packet.previous_hop} → ${packet.next_hop} · epoch ${packet.epoch}`; chart.appendChild(bar); });
+    }
+
+    function renderLog() {
+      const log = byId('eventLog'); log.replaceChildren();
+      latestResult.events.slice(0, eventCursor + 1).forEach(event => { const row = document.createElement('div'); row.className = 'log-row'; const phase = document.createElement('span'); phase.className = 'phase'; phase.textContent = event.phase; const who = document.createElement('span'); who.className = 'who'; who.textContent = event.actor; const what = document.createElement('span'); what.className = 'what'; what.textContent = event.message; row.append(phase, who, what); log.appendChild(row); });
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function renderOutput(step) {
+      const output = byId('recoveredOutput'); const download = byId('downloadButton'); download.style.display = 'none'; download.onclick = null;
+      if (!latestResult.success || step < 4) { output.textContent = latestResult.cancelled && eventCursor === latestResult.events.length - 1 ? 'Cancelled. No plaintext was reconstructed.' : 'No plaintext recovered yet.'; return; }
+      const secret = latestResult.recovered_secret || '';
+      if (!secret.startsWith('GPFILE1:')) { output.textContent = secret; return; }
+      try {
+        const file = JSON.parse(secret.slice(8)); output.textContent = `Recovered file: ${file.name} (${file.type || 'application/octet-stream'})`; download.style.display = 'inline-block'; download.textContent = `Download ${file.name}`; download.onclick = () => { const raw = atob(file.data); const bytes = Uint8Array.from(raw, char => char.charCodeAt(0)); const url = URL.createObjectURL(new Blob([bytes], { type: file.type || 'application/octet-stream' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = file.name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); };
+      } catch { output.textContent = 'The file payload was recovered but could not be decoded by the UI.'; }
+    }
+
+    async function compareModes() {
+      if (validateOptions().length) return;
+      const button = byId('compareButton'); button.disabled = true; button.textContent = 'Comparing…';
+      try {
+        const modes = ['off', 'basic', 'strong'];
+        const results = await Promise.all(modes.map(mode => requestDemo({ ...collectOptions(mode), cancel_before_release: false })));
+        const grid = byId('comparisonGrid'); grid.replaceChildren();
+        results.forEach(result => { const card = document.createElement('div'); card.className = 'compare-mode'; const title = document.createElement('strong'); title.textContent = result.mode.toUpperCase(); const big = document.createElement('span'); big.className = 'big'; big.textContent = `${result.observer.total_observed_packets} packets`; const text = document.createElement('p'); text.textContent = `${result.observer.cover_packets} cover · fixed format: ${result.observer.fixed_outer_format ? 'yes' : 'no'}. ${result.observer.remaining_leakage}`; card.append(title, big, text); grid.appendChild(card); });
+        byId('comparisonPanel').classList.add('show'); byId('comparisonPanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      } catch (error) { showError(error.message); } finally { button.disabled = false; button.textContent = 'Compare all modes'; }
+    }
+
+    function applyPreset(name) {
+      document.querySelectorAll('.preset').forEach(button => button.classList.toggle('selected', button.dataset.preset === name));
+      byId('signerCount').value = 3; byId('signerThreshold').value = 2; byId('cancelThreshold').value = 2; byId('guardianCount').value = 8; byId('guardianThreshold').value = 5; byId('recoveryOutcome').value = name === 'cancel' ? 'cancel' : 'release';
+      syncActorControls({ offlineSigner: 3, offlineGuardian: name === 'failure' ? 2 : 0, corruptGuardian: name === 'failure' ? 1 : 0 });
+      byId('validationError').classList.remove('show');
+      if (name === 'compare') compareModes();
+    }
+
+    async function handleFile(file) {
+      if (!file) return;
+      if (file.size > 700 * 1024) { showError('Choose a file no larger than 700 KiB.'); byId('fileInput').value = ''; return; }
+      const dataUrl = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(file); });
+      textSecretBeforeFile = byId('secretInput').value;
+      fileSecret = `GPFILE1:${JSON.stringify({ name: file.name, type: file.type, data: String(dataUrl).split(',')[1] })}`;
+      byId('fileName').textContent = `${file.name} · ${Math.ceil(file.size / 1024)} KiB`; byId('clearFileButton').classList.add('show'); byId('secretInput').disabled = true; byId('secretInput').value = 'File selected; contents remain client-local until protection.'; byId('validationError').classList.remove('show');
+    }
+
+    function clearSelectedFile() {
+      fileSecret = null;
+      byId('fileInput').value = '';
+      byId('fileName').textContent = 'No file selected · max 700 KiB';
+      byId('clearFileButton').classList.remove('show');
+      byId('secretInput').disabled = false;
+      byId('secretInput').value = textSecretBeforeFile || 'correct horse battery staple';
+      byId('secretInput').focus();
+    }
+
+    document.querySelectorAll('[data-mode]').forEach(button => button.addEventListener('click', () => { selectedMode = button.dataset.mode; document.querySelectorAll('[data-mode]').forEach(item => item.classList.toggle('selected', item === button)); }));
+    document.querySelectorAll('.preset').forEach(button => button.addEventListener('click', () => applyPreset(button.dataset.preset)));
+    ['signerCount', 'signerThreshold', 'cancelThreshold', 'guardianCount', 'guardianThreshold'].forEach(id => byId(id).addEventListener('change', () => { syncActorControls(); validateOptions(false); }));
+    ['offlineSigner', 'offlineGuardian', 'corruptGuardian', 'recoveryOutcome'].forEach(id => byId(id).addEventListener('change', () => { renderActorGrids(); validateOptions(false); }));
+    byId('delaySeconds').addEventListener('input', () => byId('delayOutput').textContent = `${byId('delaySeconds').value} s`);
+    byId('latencyMs').addEventListener('input', () => byId('latencyOutput').textContent = `${byId('latencyMs').value} ms`);
+    byId('fileInput').addEventListener('change', event => handleFile(event.target.files[0]));
+    byId('clearFileButton').addEventListener('click', clearSelectedFile);
+    byId('runButton').addEventListener('click', runScenario); byId('compareButton').addEventListener('click', compareModes); byId('previousButton').addEventListener('click', () => moveEvent(-1)); byId('nextButton').addEventListener('click', () => moveEvent(1)); byId('playButton').addEventListener('click', togglePlayback);
+
+    syncActorControls({ offlineSigner: 3, offlineGuardian: 0, corruptGuardian: 0 });
+  </script>
+</body>
+</html>

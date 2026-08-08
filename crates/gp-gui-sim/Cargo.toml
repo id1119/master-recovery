@@ -1,0 +1,18 @@
+[package]
+name = "gp-gui-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+gp-ipc = { path = "../gp-ipc" }
+gp-sim = { path = "../gp-sim" }
+gp-transport = { path = "../gp-transport" }
+gp-types = { path = "../gp-types" }
+serde.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

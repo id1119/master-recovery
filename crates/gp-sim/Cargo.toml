@@ -1,0 +1,22 @@
+[package]
+name = "gp-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gp-core = { path = "../gp-core" }
+gp-crypto = { path = "../gp-crypto" }
+gp-storage = { path = "../gp-storage" }
+gp-transport = { path = "../gp-transport" }
+gp-types = { path = "../gp-types" }
+gp-wire = { path = "../gp-wire" }
+hex.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
