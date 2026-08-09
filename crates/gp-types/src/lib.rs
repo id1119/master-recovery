@@ -171,8 +171,11 @@ pub struct ConfigCapsule {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RecoveryCard {
     pub config_id: Id32,
-    pub capsule_locator: String,
+    /// Locators for all redundant config stores that mirror the Config Capsule.
+    pub capsule_locators: Vec<String>,
     pub signer_mailboxes: Vec<String>,
+    /// Relay bases that mirror every mailbox route; a client fails over across them.
+    pub relay_bases: Vec<String>,
     pub signer_set_commitment: Id32,
 }
 

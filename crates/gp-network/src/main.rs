@@ -51,10 +51,10 @@ enum Command {
         secret: Option<String>,
         #[arg(long, conflicts_with = "secret")]
         secret_file: Option<PathBuf>,
-        #[arg(long)]
-        config_store: String,
-        #[arg(long)]
-        relay: String,
+        #[arg(long, required = true)]
+        config_store: Vec<String>,
+        #[arg(long, required = true)]
+        relay: Vec<String>,
         #[arg(long, env = "GP_RELAY_ADMIN_TOKEN")]
         relay_token: String,
         #[arg(long, env = "GP_NETWORK_ADMIN_TOKEN")]
@@ -155,8 +155,8 @@ async fn main() -> Result<()> {
             };
             let card = client::setup(SetupOptions {
                 secret,
-                config_store,
-                relay,
+                config_stores: config_store,
+                relays: relay,
                 relay_token,
                 admin_token,
                 signers: signer,

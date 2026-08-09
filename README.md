@@ -39,10 +39,13 @@ Run the real multi-process Docker network:
 make network-demo
 ```
 
-This starts a relay, config store, three signers, and eight guardians as
-independent persistent containers, provisions them over encrypted network
-messages, waits on guardian-local monotonic delays, rejects an intentionally
-corrupt guardian, and reconstructs plaintext only in the recovery client. See
+This starts three redundant relays, three mirrored config stores, three
+signers, and eight guardians as independent persistent containers, provisions
+them over encrypted network messages, waits on guardian-local monotonic
+delays, rejects an intentionally corrupt guardian, and reconstructs plaintext
+only in the recovery client. Every mailbox route is registered on every relay
+and the Config Capsule is mirrored to every config store, so the client
+fails over when any relay or store is stopped. See
 [`NETWORK_GUIDE.md`](NETWORK_GUIDE.md) for the complete communication model,
 VM commands, APIs, failure demos, and security limitations.
 

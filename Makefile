@@ -1,4 +1,4 @@
-.PHONY: test lint demo gui network-up network-setup network-recover network-cancel network-demo network-down
+.PHONY: test lint demo gui network-up network-setup network-recover network-cancel network-demo network-dashboard network-down
 
 test:
 	cargo test --workspace
@@ -15,12 +15,15 @@ gui:
 
 network-up:
 	docker compose -f compose.network.yml up -d --build --wait
+	docker compose -f compose.network.yml build client
 
 network-setup: network-up
 	docker compose -f compose.network.yml run --rm client setup \
 		--secret "$${GP_DEMO_SECRET:-correct horse battery staple}" \
 		--config-store http://config-store:8080 \
-		--relay http://relay:8080 \
+		--config-store http://config-store-2:8080 \
+		--config-store http://config-store-3:8080 \
+		--relay http://relay:8080 --relay http://relay-2:8080 --relay http://relay-3:8080 \
 		--admin-token local-demo-admin-token \
 		--signer http://signer-1:8080 --signer http://signer-2:8080 --signer http://signer-3:8080 \
 		--guardian http://guardian-1:8080 --guardian http://guardian-2:8080 \
@@ -40,6 +43,9 @@ network-cancel:
 		--card /demo/recovery-card.json --cancel-before-release
 
 network-demo: network-setup network-recover
+
+network-dashboard:
+	python3 tools/node-dashboard/dashboard.py
 
 network-down:
 	docker compose -f compose.network.yml down

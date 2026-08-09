@@ -49,8 +49,12 @@ pub fn create_setup(
     policy: &SetupPolicy,
     signer_mailboxes: Vec<String>,
     guardian_mailboxes: Vec<String>,
-    capsule_locator_base: &str,
+    capsule_locator_bases: &[String],
+    relay_bases: &[String],
 ) -> Result<SetupBundle> {
+    if capsule_locator_bases.is_empty() || relay_bases.is_empty() {
+        bail!("at least one config store and one relay base is required");
+    }
     if signer_mailboxes.len() != usize::from(policy.signer_count)
         || guardian_mailboxes.len() != usize::from(policy.guardian_count)
         || policy.signer_threshold == 0
@@ -236,15 +240,21 @@ pub fn create_setup(
         encrypted_recovery_descriptor,
         max_request_lifetime: 7 * 24 * 60 * 60,
     };
-    let locator = format!(
-        "{}/v1/configs/{}",
-        capsule_locator_base.trim_end_matches('/'),
-        hex::encode(config_id)
-    );
+    let locators = capsule_locator_bases
+        .iter()
+        .map(|base| {
+            format!(
+                "{}/v1/configs/{}",
+                base.trim_end_matches('/'),
+                hex::encode(config_id)
+            )
+        })
+        .collect();
     let card = RecoveryCard {
         config_id,
-        capsule_locator: locator,
+        capsule_locators: locators,
         signer_mailboxes,
+        relay_bases: relay_bases.to_vec(),
         signer_set_commitment: signer_root,
     };
     Ok(SetupBundle {
@@ -643,7 +653,8 @@ mod tests {
             (1..=5)
                 .map(|index| format!("http://relay/v1/mailboxes/guardian-opaque-{index:030}"))
                 .collect(),
-            "http://config-store",
+            &["http://config-store".to_string()],
+            &["http://relay".to_string()],
         )
         .unwrap()
     }
@@ -654,6 +665,8 @@ mod tests {
         let card_json = serde_json::to_string(&bundle.card).unwrap();
         assert!(!card_json.contains("guardian"));
         assert_eq!(bundle.card.signer_mailboxes.len(), 3);
+        assert_eq!(bundle.card.capsule_locators.len(), 1);
+        assert_eq!(bundle.card.relay_bases, vec!["http://relay"]);
         assert_eq!(bundle.guardians.len(), 5);
         assert!(
             bundle

@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Guardian Protocol Node Dashboard</title>
+<style>
+	:root {
+		--bg: #0d1117;
+		--panel: #161b22;
+		--border: #2d333b;
+		--text: #e6edf3;
+		--muted: #8b949e;
+		--green: #3fb950;
+		--amber: #d29922;
+		--red: #f85149;
+		--accent: #58a6ff;
+	}
+	* { box-sizing: border-box; margin: 0; padding: 0; }
+	body {
+		background: var(--bg);
+		color: var(--text);
+		font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+		padding: 24px;
+	}
+	header {
+		display: flex;
+		align-items: baseline;
+		gap: 16px;
+		margin-bottom: 24px;
+	}
+	h1 { font-size: 22px; font-weight: 650; }
+	#meta { color: var(--muted); font-size: 13px; }
+	.section-title {
+		font-size: 12px;
+		text-transform: uppercase;
+		letter-spacing: 1px;
+		color: var(--muted);
+		margin: 24px 0 10px;
+	}
+	.cards {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+		gap: 12px;
+	}
+	.card {
+		background: var(--panel);
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		padding: 14px;
+	}
+	.card-row {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+	}
+	.dot {
+		width: 10px;
+		height: 10px;
+		border-radius: 50%;
+		flex: none;
+		background: var(--muted);
+	}
+	.dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
+	.dot.warn { background: var(--amber); }
+	.dot.err { background: var(--red); box-shadow: 0 0 6px var(--red); }
+	.node-name { font-weight: 600; font-size: 14px; }
+	.role {
+		margin-left: auto;
+		font-size: 10px;
+		text-transform: uppercase;
+		letter-spacing: 0.5px;
+		color: var(--accent);
+		border: 1px solid var(--border);
+		border-radius: 4px;
+		padding: 2px 6px;
+	}
+	.badges { display: flex; gap: 6px; margin-top: 10px; }
+	.badge {
+		font-size: 11px;
+		padding: 2px 8px;
+		border-radius: 4px;
+		background: var(--border);
+		color: var(--muted);
+	}
+	.badge.ok { background: rgba(63, 185, 80, 0.15); color: var(--green); }
+	.badge.warn { background: rgba(210, 153, 34, 0.15); color: var(--amber); }
+	.badge.err { background: rgba(248, 81, 73, 0.15); color: var(--red); }
+	.uptime { margin-top: 12px; }
+	.uptime-label {
+		display: flex;
+		justify-content: space-between;
+		font-size: 12px;
+		color: var(--muted);
+		margin-bottom: 5px;
+	}
+	.uptime-value { color: var(--text); font-variant-numeric: tabular-nums; }
+	.uptime-bar {
+		height: 6px;
+		border-radius: 3px;
+		background: var(--border);
+		overflow: hidden;
+	}
+	.uptime-fill {
+		height: 100%;
+		border-radius: 3px;
+		background: var(--accent);
+		transition: width 1s ease;
+	}
+	.ports {
+		margin-top: 8px;
+		font-size: 11px;
+		color: var(--muted);
+		font-family: "SF Mono", Monaco, "Cascadia Mono", monospace;
+	}
+	.identity {
+		margin-top: 8px;
+		display: flex;
+		gap: 8px;
+		font-size: 10px;
+		color: var(--muted);
+		font-family: "SF Mono", Monaco, "Cascadia Mono", monospace;
+	}
+	.identity span:first-child::after { content: "·"; margin-left: 8px; }
+	#error {
+		color: var(--red);
+		font-family: "SF Mono", Monaco, monospace;
+		font-size: 13px;
+		white-space: pre-wrap;
+	}
+</style>
+</head>
+<body>
+<header>
+	<h1>Guardian Protocol Nodes</h1>
+	<span id="meta"></span>
+</header>
+<main>
+	<div class="section-title">Infrastructure</div>
+	<div id="infra" class="cards"></div>
+	<div class="section-title">Signers (s-of-m A shares)</div>
+	<div id="signers" class="cards"></div>
+	<div class="section-title">Guardians (k-of-n DEK shares + fragments)</div>
+	<div id="guardians" class="cards"></div>
+</main>
+<script>
+	const els = {
+		meta: document.getElementById("meta"),
+		infra: document.getElementById("infra"),
+		signers: document.getElementById("signers"),
+		guardians: document.getElementById("guardians"),
+	};
+
+	function isInfrastructure(service) {
+		return service.startsWith("relay") || service.startsWith("config-store");
+	}
+
+	function dotClass(node) {
+		if (node.state !== "running") {
+			return "err";
+		}
+		if (node.health === "healthy") {
+			return "ok";
+		}
+		if (node.health === "starting") {
+			return "warn";
+		}
+		return node.health === "unhealthy" ? "err" : "warn";
+	}
+
+	function badgeClass(node) {
+		if (node.state !== "running") {
+			return "err";
+		}
+		if (node.health === "healthy") {
+			return "ok";
+		}
+		return node.health === "unhealthy" ? "err" : "warn";
+	}
+
+	function roleLabel(service) {
+		if (service === "relay") {
+			return "relay";
+		}
+		if (service === "config-store") {
+			return "config store";
+		}
+		if (service.startsWith("signer")) {
+			return "signer";
+		}
+		return "guardian";
+	}
+
+	function shortImage(image) {
+		return image.replace(/^guardian-protocol-network-/, "");
+	}
+
+	function renderCard(node) {
+		const card = document.createElement("div");
+		card.className = "card";
+
+		const row = document.createElement("div");
+		row.className = "card-row";
+		const dot = document.createElement("span");
+		dot.className = `dot ${dotClass(node)}`;
+		const name = document.createElement("span");
+		name.className = "node-name";
+		name.textContent = node.service;
+		const role = document.createElement("span");
+		role.className = "role";
+		role.textContent = roleLabel(node.service);
+		row.append(dot, name, role);
+		card.appendChild(row);
+
+		const badges = document.createElement("div");
+		badges.className = "badges";
+		const stateBadge = document.createElement("span");
+		stateBadge.className = `badge ${badgeClass(node)}`;
+		stateBadge.textContent = node.state;
+		const healthBadge = document.createElement("span");
+		healthBadge.className = `badge ${badgeClass(node)}`;
+		healthBadge.textContent = node.health === "none" ? "no health check" : node.health;
+		badges.append(stateBadge, healthBadge);
+		if (node.restart_count && node.restart_count > 0) {
+			const restartBadge = document.createElement("span");
+			restartBadge.className = "badge warn";
+			restartBadge.textContent = `restarted ${node.restart_count}x`;
+			badges.appendChild(restartBadge);
+		}
+		if (node.memory) {
+			const memoryBadge = document.createElement("span");
+			memoryBadge.className = "badge";
+			memoryBadge.textContent = node.memory.split(" / ")[0];
+			badges.appendChild(memoryBadge);
+		}
+		card.appendChild(badges);
+
+		if (node.image || node.container_id) {
+			const identity = document.createElement("div");
+			identity.className = "identity";
+			if (node.image) {
+				const image = document.createElement("span");
+				image.textContent = shortImage(node.image);
+				identity.appendChild(image);
+			}
+			if (node.container_id) {
+				const id = document.createElement("span");
+				id.textContent = node.container_id;
+				identity.appendChild(id);
+			}
+			card.appendChild(identity);
+		}
+
+		const uptime = document.createElement("div");
+		uptime.className = "uptime";
+		const label = document.createElement("div");
+		label.className = "uptime-label";
+		const uptimeText = document.createElement("span");
+		uptimeText.textContent = "uptime";
+		const value = document.createElement("span");
+		value.className = "uptime-value";
+		value.textContent = formatUptime(node.uptime_secs);
+		label.append(uptimeText, value);
+		const bar = document.createElement("div");
+		bar.className = "uptime-bar";
+		const fill = document.createElement("div");
+		fill.className = "uptime-fill";
+		fill.style.width = uptimePercent(node.uptime_secs);
+		bar.appendChild(fill);
+		uptime.append(label, bar);
+		card.appendChild(uptime);
+
+		if (node.ports) {
+			const ports = document.createElement("div");
+			ports.className = "ports";
+			ports.textContent = node.ports;
+			card.appendChild(ports);
+		}
+
+		return card;
+	}
+
+	function appendNodes(container, nodes) {
+		container.replaceChildren();
+		for (const node of nodes) {
+			container.appendChild(renderCard(node));
+		}
+	}
+
+	function render(data) {
+		const infra = [];
+		const signers = [];
+		const guardians = [];
+		let maxUptime = 0;
+		for (const node of data.nodes) {
+			if (node.uptime_secs !== null && node.uptime_secs > maxUptime) {
+				maxUptime = node.uptime_secs;
+			}
+			if (isInfrastructure(node.service)) {
+				infra.push(node);
+			} else if (node.service.startsWith("signer")) {
+				signers.push(node);
+			} else {
+				guardians.push(node);
+			}
+		}
+		setMaxUptime(maxUptime);
+		appendNodes(els.infra, infra);
+		appendNodes(els.signers, signers);
+		appendNodes(els.guardians, guardians);
+	}
+
+	function setMaxUptime(secs) {
+		if (secs > 0) {
+			document.documentElement.style.setProperty("--max-uptime", String(secs));
+		}
+	}
+
+	function uptimePercent(secs) {
+		const max = Number(document.documentElement.style.getPropertyValue("--max-uptime")) || 1;
+		if (secs === null || secs === undefined) {
+			return 0;
+		}
+		return Math.min(100, Math.round((secs / max) * 100));
+	}
+
+	function formatUptime(secs) {
+		if (secs === null || secs === undefined) {
+			return "n/a";
+		}
+		const hours = Math.floor(secs / 3600);
+		const minutes = Math.floor((secs % 3600) / 60);
+		const seconds = secs % 60;
+		if (hours > 0) {
+			return `${hours}h ${String(minutes).padStart(2, "0")}m`;
+		}
+		if (minutes > 0) {
+			return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+		}
+		return `${seconds}s`;
+	}
+
+	async function poll() {
+		try {
+			const response = await fetch("/api/status");
+			const data = await response.json();
+			if (data.error) {
+				els.meta.textContent = "poll error";
+				els.infra.innerHTML = `<div id="error">${data.error}</div>`;
+				return;
+			}
+			render(data);
+			els.meta.textContent = `polled ${new Date(data.fetched_at * 1000).toLocaleTimeString()} · ${data.nodes.length} containers · auto-refresh 2s`;
+		} catch (error) {
+			els.meta.textContent = "poll failed: " + error.message;
+		}
+	}
+
+	poll();
+	setInterval(poll, 2000);
+</script>
+</body>
+</html>

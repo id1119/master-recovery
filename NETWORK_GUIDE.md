@@ -177,12 +177,21 @@ contributions until it has the configured number of valid responses.
 `compose.network.yml` starts:
 
 ```text
-1 relay
-1 config store
+3 relay services (relay, relay-2, relay-3)
+3 config store services (config-store, config-store-2, config-store-3)
 3 independent signer containers
 8 independent guardian containers
 1 ephemeral setup/recovery client image
 ```
+
+Every mailbox route is registered at every relay, and the Config Capsule is
+published to every config store. The Recovery Card carries all config store
+locators and all relay bases; the recovery client fetches the capsule from the
+first store that answers and routes each mailbox message through the first
+relay replica that answers, failing over silently when a replica is stopped or
+unreachable. This removes any single relay or single config store as an
+availability dependency: recovery still works with two of three relays and two
+of three stores stopped, as verified by `network-recover`.
 
 Only two services are published to the host:
 
@@ -700,10 +709,14 @@ Important limitations:
 3. A threshold of compromised signers can authorize recovery and reconstruct A.
 4. A threshold of compromised guardians can ignore their delay policy, though
    their stored DEK shares still require A.
-5. The relay can drop all messages and prevent availability.
+5. Any individual relay can drop all messages and prevent recovery while it is
+   the client's selected replica; the client fails over to its other registered
+   relay replicas, so availability depends on relay redundancy, not on a single
+   relay.
 6. A global observer still sees endpoints, timing, volume and approximate
    message sizes.
-7. One relay is not a mixnet and provides no strong anonymity claim.
+7. A relay hop is a direct forwarding hop, not a mixnet, and provides no
+   strong anonymity claim.
 8. Node state needs encrypted volumes, secret management, backups, OS hardening
    and access control before carrying valuable secrets.
 9. The Compose administration tokens are demo defaults and must be replaced.
