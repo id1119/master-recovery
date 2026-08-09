@@ -1,4 +1,4 @@
-.PHONY: test lint demo gui
+.PHONY: test lint demo gui network-up network-setup network-recover network-cancel network-demo network-down
 
 test:
 	cargo test --workspace
@@ -13,3 +13,33 @@ demo:
 gui:
 	cargo run -p gp-cli -- serve --port 8787
 
+network-up:
+	docker compose -f compose.network.yml up -d --build --wait
+
+network-setup: network-up
+	docker compose -f compose.network.yml run --rm client setup \
+		--secret "$${GP_DEMO_SECRET:-correct horse battery staple}" \
+		--config-store http://config-store:8080 \
+		--relay http://relay:8080 \
+		--admin-token local-demo-admin-token \
+		--signer http://signer-1:8080 --signer http://signer-2:8080 --signer http://signer-3:8080 \
+		--guardian http://guardian-1:8080 --guardian http://guardian-2:8080 \
+		--guardian http://guardian-3:8080 --guardian http://guardian-4:8080 \
+		--guardian http://guardian-5:8080 --guardian http://guardian-6:8080 \
+		--guardian http://guardian-7:8080 --guardian http://guardian-8:8080 \
+		--signer-threshold 2 --cancellation-threshold 2 --guardian-threshold 5 \
+		--delay-secs 5 --card /demo/recovery-card.json
+
+network-recover:
+	docker compose -f compose.network.yml run --rm client recover \
+		--card /demo/recovery-card.json --output /demo/recovered-secret.bin
+
+network-cancel:
+	$(MAKE) network-setup
+	docker compose -f compose.network.yml run --rm client recover \
+		--card /demo/recovery-card.json --cancel-before-release
+
+network-demo: network-setup network-recover
+
+network-down:
+	docker compose -f compose.network.yml down

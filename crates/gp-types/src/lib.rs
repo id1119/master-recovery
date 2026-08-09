@@ -190,6 +190,7 @@ pub struct GuardianPolicy {
     pub config_id: Id32,
     pub config_version: u64,
     pub signer_set_commitment: Id32,
+    pub signer_count: u16,
     pub signer_threshold: u16,
     pub cancellation_threshold: u16,
     pub minimum_recovery_delay: u64,

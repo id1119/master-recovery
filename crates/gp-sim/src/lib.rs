@@ -7,7 +7,7 @@ use gp_crypto::{
     CryptoError, RecipientKeyPair, SecretVec, XWING_PUBLIC_KEY_LEN, aead_decrypt, aead_encrypt,
     descriptor_key, erasure_encode, erasure_reconstruct, guardian_share_key, hash_aead,
     merkle_commit, merkle_verify, recover_secret, sha256, sign, signing_key, split_secret, verify,
-    verifying_key_bytes,
+    verifying_key_bytes, zeroize_id,
 };
 use gp_storage::{ConfigStore, GuardianState, SignerState, StorageError};
 use gp_transport::{ObserverSummary, TransportConfig, protect_payload, simulate_observer};
@@ -105,9 +105,9 @@ impl DemoOptions {
                 "the demo accepts files up to 1 MiB".into(),
             ));
         }
-        if self.signer_count == 0 || self.signer_count > 255 {
+        if self.signer_count == 0 || self.signer_count > 20 {
             return Err(SimError::InvalidOptions(
-                "signer count must be between 1 and 255".into(),
+                "signer count must be between 1 and 20 in the simulator".into(),
             ));
         }
         if self.signer_threshold == 0 || self.signer_threshold > self.signer_count {
@@ -120,9 +120,9 @@ impl DemoOptions {
                 "cancellation threshold must be between 1 and the signer count".into(),
             ));
         }
-        if self.guardian_count == 0 || self.guardian_count > 255 {
+        if self.guardian_count == 0 || self.guardian_count > 32 {
             return Err(SimError::InvalidOptions(
-                "guardian count must be between 1 and 255".into(),
+                "guardian count must be between 1 and 32 in the simulator".into(),
             ));
         }
         if self.guardian_threshold == 0 || self.guardian_threshold > self.guardian_count {
@@ -188,6 +188,11 @@ impl DemoOptions {
                 "cover rate must be 100 cells per epoch or less".into(),
             ));
         }
+        if self.network_latency_ms == 0 || self.network_latency_ms > 10_000 {
+            return Err(SimError::InvalidOptions(
+                "network latency must be between 1 and 10000 milliseconds".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -209,6 +214,7 @@ pub struct DemoResult {
     pub cancelled: bool,
     pub final_state: RecoveryState,
     pub recovered_secret: Option<String>,
+    pub recovery_card: RecoveryCard,
     pub config_id_hex: String,
     pub request_id_hex: String,
     pub signer_threshold: u16,
@@ -422,6 +428,7 @@ pub fn run_demo(options: &DemoOptions) -> Result<DemoResult, SimError> {
         return Ok(finish_result(
             options,
             &capsule,
+            &world.card,
             &request,
             DemoOutcome {
                 state: recovery_machine.state(),
@@ -593,6 +600,7 @@ pub fn run_demo(options: &DemoOptions) -> Result<DemoResult, SimError> {
     Ok(finish_result(
         options,
         &capsule,
+        &world.card,
         &request,
         DemoOutcome {
             state: recovery_machine.state(),
@@ -630,7 +638,7 @@ fn setup_world(
         signers.push(SignerState {
             signer_id: index,
             mailbox: opaque_mailbox(rng),
-            authorization_share: a_shares[usize::from(index - 1)].clone(),
+            authorization_share: a_shares[usize::from(index - 1)].to_vec(),
             signing_seed: seed,
             signing_public_key: public,
             membership_proof: vec![],
@@ -680,7 +688,7 @@ fn setup_world(
     let mut leaves = Vec::new();
     for index in 1..=policy.guardian_count {
         let share_context = gp_wire::guardian_share_context(&config_id, config_version, index)?;
-        let key = guardian_share_key(
+        let mut key = guardian_share_key(
             authorization_key
                 .as_slice()
                 .try_into()
@@ -694,7 +702,9 @@ fn setup_world(
             random_nonce(rng),
             &dek_shares[usize::from(index - 1)],
             &share_context,
-        )?;
+        );
+        zeroize_id(&mut key);
+        let encrypted_dek_share = encrypted_dek_share?;
         let fragment = fragments[usize::from(index - 1)].clone();
         let leaf = sha256(&gp_wire::guardian_leaf(
             &config_id,
@@ -734,6 +744,7 @@ fn setup_world(
                 config_id,
                 config_version,
                 signer_set_commitment: signer_root,
+                signer_count: policy.signer_count,
                 signer_threshold: policy.signer_threshold,
                 cancellation_threshold: policy.cancellation_threshold,
                 minimum_recovery_delay: policy.minimum_recovery_delay,
@@ -751,8 +762,8 @@ fn setup_world(
         ciphertext_len: payload.ciphertext.len() as u64,
         payload_nonce,
     };
-    let descriptor_plaintext = serde_json::to_vec(&descriptor)?;
-    let key = descriptor_key(
+    let descriptor_plaintext = SecretVec::new(serde_json::to_vec(&descriptor)?);
+    let mut key = descriptor_key(
         authorization_key
             .as_slice()
             .try_into()
@@ -766,7 +777,9 @@ fn setup_world(
         random_nonce(rng),
         &descriptor_plaintext,
         &descriptor_context,
-    )?;
+    );
+    zeroize_id(&mut key);
+    let encrypted_recovery_descriptor = encrypted_recovery_descriptor?;
     let capsule = ConfigCapsule {
         protocol_version: PROTOCOL_VERSION,
         crypto_suite: CryptoSuite::default(),
@@ -909,6 +922,7 @@ fn validate_guardian_policy(
     if policy.config_id != capsule.config_id
         || policy.config_version != capsule.config_version
         || policy.signer_set_commitment != capsule.signer_set_commitment
+        || policy.signer_count != capsule.signer_count
         || policy.signer_threshold != capsule.signer_threshold
         || policy.cancellation_threshold != capsule.cancellation_threshold
         || policy.minimum_recovery_delay != capsule.minimum_recovery_delay
@@ -1048,12 +1062,14 @@ fn open_descriptor(
     let a: &[u8; 32] = authorization_key
         .try_into()
         .map_err(|_| SimError::RecoveryMismatch)?;
-    let key = descriptor_key(a, &capsule.config_id, capsule.config_version)?;
+    let mut key = descriptor_key(a, &capsule.config_id, capsule.config_version)?;
     let plaintext = aead_decrypt(
         &key,
         &capsule.encrypted_recovery_descriptor,
         &gp_wire::descriptor_context(&capsule.config_id, capsule.config_version)?,
-    )?;
+    );
+    zeroize_id(&mut key);
+    let plaintext = plaintext?;
     let descriptor: RecoveryDescriptor = serde_json::from_slice(&plaintext)?;
     validate_descriptor(&descriptor, capsule)?;
     Ok(descriptor)
@@ -1271,7 +1287,7 @@ fn validate_guardian_contribution(
     let a: &[u8; 32] = authorization_key
         .try_into()
         .map_err(|_| SimError::RecoveryMismatch)?;
-    let key = guardian_share_key(
+    let mut key = guardian_share_key(
         a,
         &contribution.config_id,
         contribution.config_version,
@@ -1285,7 +1301,9 @@ fn validate_guardian_contribution(
             contribution.config_version,
             contribution.guardian_index,
         )?,
-    )?;
+    );
+    zeroize_id(&mut key);
+    let plaintext = plaintext?;
     Ok(plaintext.to_vec())
 }
 
@@ -1301,6 +1319,7 @@ struct DemoOutcome {
 fn finish_result(
     options: &DemoOptions,
     capsule: &ConfigCapsule,
+    recovery_card: &RecoveryCard,
     request: &RecoveryRequest,
     outcome: DemoOutcome,
 ) -> DemoResult {
@@ -1318,6 +1337,7 @@ fn finish_result(
         cancelled: outcome.state == RecoveryState::Cancelled,
         final_state: outcome.state,
         recovered_secret: outcome.recovered_secret,
+        recovery_card: recovery_card.clone(),
         config_id_hex: hex::encode(capsule.config_id),
         request_id_hex: hex::encode(request.request_id),
         signer_threshold: capsule.signer_threshold,

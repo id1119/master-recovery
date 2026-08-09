@@ -29,7 +29,7 @@ Every approval and released contribution must be bound to the exact fresh recove
 
 ### Replay Resistance
 
-Old request ids, nonces, expired requests, and stale config versions must not be reusable.
+Old request ids, reused nonces, expired requests, and stale config versions must not be reusable by signers or guardians.
 
 ### Integrity
 
@@ -90,6 +90,9 @@ Cancellation is threshold-signed and request-specific.
 
 A guardian that observes a valid cancellation must never release for that request.
 
+If cancellation is observed before Begin because the network reordered
+messages, the guardian stores a tombstone and rejects the later Begin.
+
 A signer that has cancelled must not later issue a release vote for the same request.
 
 Guardians fail closed when release state is ambiguous.
@@ -116,9 +119,10 @@ The UI and documentation must not call the whole system fully post-quantum while
 5. A guardian releases only for the exact approved request/recipient after its local delay and required release certificate.
 6. A valid observed cancellation permanently kills the request for an honest guardian.
 7. Tampered guardian material is rejected before reconstruction.
-8. A stale config version or replayed request id is rejected.
-9. The guardian roster is not stored publicly in plaintext.
-10. Final plaintext reconstruction occurs only on the recovery client.
+8. A stale config version, replayed request id, or reused request nonce is rejected.
+9. Release and cancellation votes prove pseudonymous signer membership against the pinned signer-set commitment.
+10. The guardian roster is not stored publicly in plaintext.
+11. Final plaintext reconstruction occurs only on the recovery client.
 
 ## 7. Explicit Non-Claims
 

@@ -236,6 +236,22 @@ pub fn payload_context(config_id: &[u8; 32], config_version: u64) -> Result<Vec<
     Ok(out.finish())
 }
 
+pub fn node_provision_context(node_id: &str, role: &str) -> Result<Vec<u8>, WireError> {
+    let mut out = Transcript::default();
+    out.domain(b"gp/network-node-provision/v1")?;
+    out.bytes(node_id.as_bytes())?;
+    out.bytes(role.as_bytes())?;
+    Ok(out.finish())
+}
+
+pub fn mailbox_transport_context(mailbox: &str, direction: &str) -> Result<Vec<u8>, WireError> {
+    let mut out = Transcript::default();
+    out.domain(b"gp/network-mailbox-transport/v1")?;
+    out.bytes(mailbox.as_bytes())?;
+    out.bytes(direction.as_bytes())?;
+    Ok(out.finish())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,5 +283,38 @@ mod tests {
         let encoded = frame(b"protocol message").unwrap();
         assert_eq!(deframe(&encoded).unwrap(), b"protocol message");
         assert!(deframe(&encoded[..encoded.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn release_vote_binds_signer_membership_material() {
+        let mut vote = ReleaseVote {
+            protocol_version: gp_types::PROTOCOL_VERSION,
+            config_id: [1; 32],
+            config_version: 1,
+            request_id: [2; 32],
+            request_digest: [3; 32],
+            recovery_recipient_key: vec![4; 1216],
+            nonce: [5; 32],
+            signer_id: 2,
+            signer_public_key: [6; 32],
+            signer_membership_proof: vec![7; 64],
+            signer_signature: vec![],
+        };
+        let original = release_vote(&vote).unwrap();
+        vote.signer_membership_proof[0] ^= 1;
+        assert_ne!(original, release_vote(&vote).unwrap());
+    }
+
+    #[test]
+    fn network_mailbox_context_binds_mailbox_and_direction() {
+        let request = mailbox_transport_context("mailbox-a", "request").unwrap();
+        assert_ne!(
+            request,
+            mailbox_transport_context("mailbox-a", "response").unwrap()
+        );
+        assert_ne!(
+            request,
+            mailbox_transport_context("mailbox-b", "request").unwrap()
+        );
     }
 }

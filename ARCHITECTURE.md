@@ -14,6 +14,7 @@ crates/
     gp-ipc
     gp-gui-sim
     gp-cli
+    gp-network
 ```
 
 ## gp-types
@@ -140,6 +141,10 @@ A browser frontend must connect through a local backend/gateway rather than dire
 
 Visual simulator backend.
 
+The local gateway binds to loopback, accepts secrets only in same-origin POST
+bodies, disables response caching, and does not enable cross-origin reads. It
+must never accept plaintext secrets in query strings.
+
 It exposes:
 
 - actor graph,
@@ -159,6 +164,21 @@ Commands for:
 - guardian simulation,
 - scripted demo,
 - deterministic replay.
+
+## gp-network
+
+Real multi-process network runtime for Docker or separate VMs.
+
+- relay, config-store, signer, and guardian HTTP servers,
+- persistent per-node state,
+- X-Wing-encrypted provisioning and mailbox envelopes,
+- actual wall-clock expiry and guardian-local monotonic delay enforcement,
+- ephemeral setup and recovery clients,
+- the same `gp-core` guardian state machine and `gp-crypto` primitives used by
+  the simulator.
+
+The network relay is a direct single-hop prototype, not the STRONG simulated
+mixnet. See `NETWORK_GUIDE.md` for APIs, flows, Docker topology, and limits.
 
 ## State-Machine Boundary
 

@@ -170,7 +170,9 @@ If there is time after the demo is complete, the signature abstraction may be mi
 
 ### Threshold Sharing
 
-Use a maintained Shamir Secret Sharing implementation.
+Use the maintained `blahaj` Shamir Secret Sharing implementation. Do not use
+`sharks`: all released versions are affected by RUSTSEC-2024-0398 and no
+patched `sharks` release exists.
 
 Do not implement field arithmetic manually and do not hardcode a custom 256-bit prime merely because the design says "256-bit secret".
 
@@ -528,6 +530,7 @@ On approval, signer i returns:
 SignerContribution {
     request,
     signer_id,
+    signer_public_key,
     signer_signature,
     signer_membership_proof,
     encrypted_A_share_i
@@ -604,6 +607,13 @@ During the delay, configured signers may issue signed cancellation votes for the
 
 Once the cancellation threshold is reached, a valid `CancelCertificate` permanently invalidates the request for every honest node that receives it.
 
+Cancellation votes carry the signer's pseudonymous public key and Merkle
+membership proof. This lets a guardian validate each vote directly against its
+pinned `signer_set_commitment`, without access to a global signer registry or
+simulator-privileged state. A valid cancellation received before the
+corresponding Begin certificate is retained as a tombstone and blocks a later
+Begin for the same request id and digest.
+
 A signer that has signed cancellation for a request must not later sign the release phase for that request.
 
 An owner identity that is still available may optionally hard-cancel under the existing project policy.
@@ -620,6 +630,10 @@ The required signer threshold produces a `ReleaseCertificate` bound to:
 - the same request id,
 - the same recovery recipient,
 - the same nonce.
+
+Each release vote carries the signer's pseudonymous public key and Merkle
+membership proof, and the complete vote is signed. Guardians verify membership
+against their locally pinned signer-set commitment before counting the vote.
 
 An honest guardian releases only if:
 
@@ -930,6 +944,7 @@ RecoveryRequest {
 SignerContribution {
     request,
     signer_id,
+    signer_public_key,
     signer_signature,
     signer_membership_proof,
     encrypted_A_share_i
@@ -957,6 +972,8 @@ CancelRequest {
     reason_code,
     nonce,
     signer_id,
+    signer_public_key,
+    signer_membership_proof,
     signer_signature
 }
 ```
@@ -971,9 +988,12 @@ ReleaseVote {
     config_id,
     config_version,
     request_id,
+    request_digest,
     recovery_recipient_key,
     nonce,
     signer_id,
+    signer_public_key,
+    signer_membership_proof,
     signer_signature
 }
 ```

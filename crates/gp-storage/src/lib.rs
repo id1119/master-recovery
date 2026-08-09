@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use gp_types::{ConfigCapsule, GuardianRecord, Id32, SignerPolicy};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
 pub enum StorageError {
@@ -20,7 +21,7 @@ pub enum StorageError {
     RequestMismatch,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignerState {
     pub signer_id: u16,
     pub mailbox: String,
@@ -29,9 +30,9 @@ pub struct SignerState {
     pub signing_public_key: [u8; 32],
     pub membership_proof: Vec<u8>,
     pub policy: SignerPolicy,
-    pub seen_requests: BTreeMap<Id32, Id32>,
+    pub seen_requests: BTreeMap<String, Id32>,
     pub seen_nonces: BTreeSet<Id32>,
-    pub cancelled_requests: BTreeMap<Id32, Id32>,
+    pub cancelled_requests: BTreeMap<String, Id32>,
 }
 
 impl SignerState {
@@ -44,10 +45,11 @@ impl SignerState {
         request_digest: Id32,
     ) -> Result<(), StorageError> {
         self.validate_config(config_id, config_version)?;
-        if self.seen_requests.contains_key(&request_id) || !self.seen_nonces.insert(nonce) {
+        let request_key = hex::encode(request_id);
+        if self.seen_requests.contains_key(&request_key) || !self.seen_nonces.insert(nonce) {
             return Err(StorageError::Replay);
         }
-        self.seen_requests.insert(request_id, request_digest);
+        self.seen_requests.insert(request_key, request_digest);
         Ok(())
     }
 
@@ -59,14 +61,15 @@ impl SignerState {
         request_digest: Id32,
     ) -> Result<(), StorageError> {
         self.validate_config(config_id, config_version)?;
+        let request_key = hex::encode(request_id);
         if self
             .cancelled_requests
-            .get(&request_id)
+            .get(&request_key)
             .is_some_and(|stored| stored != &request_digest)
         {
             return Err(StorageError::RequestMismatch);
         }
-        self.cancelled_requests.insert(request_id, request_digest);
+        self.cancelled_requests.insert(request_key, request_digest);
         Ok(())
     }
 
@@ -78,7 +81,7 @@ impl SignerState {
         request_digest: &Id32,
     ) -> Result<(), StorageError> {
         self.validate_config(config_id, config_version)?;
-        match self.cancelled_requests.get(request_id) {
+        match self.cancelled_requests.get(&hex::encode(request_id)) {
             Some(stored) if stored == request_digest => Err(StorageError::Cancelled),
             Some(_) => Err(StorageError::RequestMismatch),
             None => Ok(()),
@@ -94,7 +97,7 @@ impl SignerState {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GuardianState {
     pub guardian_id: u16,
     pub mailbox: String,
@@ -122,7 +125,7 @@ impl GuardianState {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ConfigStore {
     capsules: BTreeMap<Id32, ConfigCapsule>,
 }

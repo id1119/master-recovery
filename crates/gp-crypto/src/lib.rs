@@ -126,21 +126,21 @@ pub fn split_secret(
     threshold: u16,
     total: u16,
     seed: Id32,
-) -> Result<Vec<Vec<u8>>, CryptoError> {
+) -> Result<Vec<SecretVec>, CryptoError> {
     if threshold == 0 || threshold > total || total > 255 {
         return Err(CryptoError::InvalidThreshold);
     }
-    let sharks = Sharks(threshold as u8);
+    let scheme = Sharks(threshold as u8);
     let mut rng = ChaCha20Rng08::from_seed(seed);
-    Ok(sharks
+    Ok(scheme
         .dealer_rng(secret, &mut rng)
         .take(total as usize)
-        .map(|share| Vec::from(&share))
+        .map(|share| Zeroizing::new(Vec::from(&share)))
         .collect())
 }
 
-pub fn recover_secret(
-    shares: &[Vec<u8>],
+pub fn recover_secret<T: AsRef<[u8]>>(
+    shares: &[T],
     threshold: u16,
 ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     if shares.len() < threshold as usize {
@@ -148,7 +148,7 @@ pub fn recover_secret(
     }
     let decoded: Vec<Share> = shares
         .iter()
-        .map(|share| Share::try_from(share.as_slice()).map_err(|_| CryptoError::InvalidShare))
+        .map(|share| Share::try_from(share.as_ref()).map_err(|_| CryptoError::InvalidShare))
         .collect::<Result<_, _>>()?;
     Sharks(threshold as u8)
         .recover(&decoded)
@@ -330,6 +330,10 @@ pub fn hash_aead(value: &AeadCiphertext) -> Id32 {
     let mut bytes = value.nonce.to_vec();
     bytes.extend_from_slice(&value.ciphertext);
     sha256(&bytes)
+}
+
+pub fn zeroize_id(value: &mut Id32) {
+    value.zeroize();
 }
 
 #[cfg(test)]

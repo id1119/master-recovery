@@ -1,0 +1,5 @@
+target
+demo-data
+.git
+.DS_Store
+*.log

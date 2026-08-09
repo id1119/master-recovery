@@ -33,19 +33,34 @@ make gui
 
 Then open <http://127.0.0.1:8787>.
 
-The browser opens with four stage-ready scenarios: standard recovery, guardian
-failure/replacement, cancellation just before release, and a same-seed metadata
-comparison. Pick a scenario and press **Run guided recovery**; the walkthrough
-can then be played automatically or stepped backward and forward one verified
-protocol event at a time.
+Run the real multi-process Docker network:
 
-The configuration sidebar accepts either text or a file up to 700 KiB and
-exposes all simulator controls from the design: signer/guardian counts and
-thresholds, cancellation threshold, offline/corrupt actors, delay, metadata
-mode, latency, loss, duplication, mix drops, cover traffic, and replay seed.
-Impossible combinations are rejected with a specific explanation before any
-protocol execution. File plaintext is shown or downloaded only in the final
-recovery-client panel.
+```sh
+make network-demo
+```
+
+This starts a relay, config store, three signers, and eight guardians as
+independent persistent containers, provisions them over encrypted network
+messages, waits on guardian-local monotonic delays, rejects an intentionally
+corrupt guardian, and reconstructs plaintext only in the recovery client. See
+[`NETWORK_GUIDE.md`](NETWORK_GUIDE.md) for the complete communication model,
+VM commands, APIs, failure demos, and security limitations.
+
+The browser uses a compact three-stage flow: create an encrypted backup, save
+the generated Recovery Card, then test recovery on a fresh-client view. The
+verified protocol trace can be played automatically or stepped backward and
+forward one event at a time. The Recovery Card can be copied or downloaded as
+JSON; it contains the config locator and opaque signer mailboxes, never the
+guardian roster or a decryption key.
+
+The backup card accepts either text or a file up to 700 KiB. Safe defaults keep
+the first screen short. **Customize plan and test conditions** exposes every
+simulator control from the design: the three scenarios, signer/guardian counts
+and thresholds, cancellation threshold, offline/corrupt actors, delay,
+metadata mode, latency, loss, duplication, mix drops, cover traffic, replay
+seed, and same-seed mode comparison. Impossible combinations are rejected with
+a specific explanation before protocol execution. File plaintext is shown or
+downloaded only in the final recovery-client panel.
 
 Useful direct commands:
 
@@ -71,7 +86,8 @@ Use `0` for a guardian/signer option to disable that adversarial toggle.
 ## What is real
 
 - XChaCha20-Poly1305 payload encryption and guardian-share wrapping.
-- Maintained Shamir secret sharing for `A` and `DEK`.
+- Maintained `blahaj` Shamir secret sharing for `A` and `DEK`; the vulnerable,
+  unpatched `sharks` dependency is not used.
 - Reed–Solomon erasure coding over encrypted payload bytes.
 - SHA-256 commitments and Merkle membership proofs.
 - Canonical length-prefixed signature transcripts with domain separation.
@@ -81,6 +97,10 @@ Use `0` for a guardian/signer option to disable that adversarial toggle.
   digest binding.
 - Deterministic recovery and guardian state machines.
 - Threshold-valid cancellation that permanently kills an observed request.
+- Signer-side request-id/nonce replay protection and guardian cancellation
+  tombstones that survive Begin/cancel message reordering.
+- Independently verifiable signer Merkle membership in begin, cancellation,
+  and release certificates.
 - Malicious/offline guardian replacement and final client-only reconstruction.
 - Successful-recovery rotation to fresh version-2 keys, shares, fragments,
   commitments, and opaque slots.
@@ -116,6 +136,7 @@ gp-sim         seeded end-to-end protocol orchestration
 gp-ipc         versioned CLI/browser command boundary
 gp-gui-sim     local browser gateway and visual lab
 gp-cli         demo, cancellation, comparison, and server commands
+gp-network     real HTTP nodes, Docker network, setup and recovery clients
 ```
 
 `gp-core` performs no filesystem, socket, environment, system-clock, or OS-RNG

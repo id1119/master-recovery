@@ -106,6 +106,11 @@ mod tests {
             "metadataMode",
             "fileInput",
             "compareButton",
+            "copyCardButton",
+            "downloadCardButton",
+            "networkSignerValue",
+            "networkGuardianValue",
+            "requestBindingFact",
         ] {
             assert!(
                 INDEX_HTML.contains(required),
@@ -114,5 +119,22 @@ mod tests {
         }
         assert!(INDEX_HTML.contains("not a production anonymity network"));
         assert!(INDEX_HTML.contains("Ed25519 is classical"));
+        assert!(INDEX_HTML.contains("method: 'POST'"));
+        assert!(!INDEX_HTML.contains("/api/demo?"));
+    }
+
+    #[test]
+    fn secret_responses_are_not_cacheable_or_cross_origin_embeddable() {
+        let headers = security_headers();
+        assert_eq!(headers.get(CACHE_CONTROL).unwrap(), "no-store");
+        assert_eq!(headers.get(REFERRER_POLICY).unwrap(), "no-referrer");
+        assert!(
+            headers
+                .get("content-security-policy")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("frame-ancestors 'none'")
+        );
     }
 }

@@ -1,0 +1,132 @@
+name: guardian-protocol-network
+
+x-actor-health: &actor-health
+  interval: 2s
+  timeout: 2s
+  retries: 30
+  start_period: 2s
+
+x-guardian-common: &guardian-common
+  build:
+    context: .
+    dockerfile: Dockerfile.network
+  command: ["serve", "--role", "guardian", "--listen", "0.0.0.0:8080", "--data-dir", "/data"]
+  environment:
+    GP_ALLOW_INSECURE_DEMO_DELAY: "true"
+    GP_NETWORK_ADMIN_TOKEN: "local-demo-admin-token"
+  healthcheck:
+    <<: *actor-health
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/health"]
+  networks: [guardian-net]
+
+x-signer-common: &signer-common
+  build:
+    context: .
+    dockerfile: Dockerfile.network
+  command: ["serve", "--role", "signer", "--listen", "0.0.0.0:8080", "--data-dir", "/data"]
+  environment:
+    GP_AUTO_APPROVE: "true"
+    GP_NETWORK_ADMIN_TOKEN: "local-demo-admin-token"
+  healthcheck:
+    <<: *actor-health
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/health"]
+  networks: [guardian-net]
+
+services:
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile.network
+    command: ["serve", "--role", "relay", "--listen", "0.0.0.0:8080", "--data-dir", "/data"]
+    environment:
+      GP_RELAY_ADMIN_TOKEN: "local-demo-relay-token"
+    ports: ["127.0.0.1:9000:8080"]
+    volumes: ["relay-data:/data"]
+    healthcheck:
+      <<: *actor-health
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/health"]
+    networks: [guardian-net]
+
+  config-store:
+    build:
+      context: .
+      dockerfile: Dockerfile.network
+    command: ["serve", "--role", "config-store", "--listen", "0.0.0.0:8080", "--data-dir", "/data"]
+    environment:
+      GP_NETWORK_ADMIN_TOKEN: "local-demo-admin-token"
+    ports: ["127.0.0.1:9001:8080"]
+    volumes: ["config-data:/data"]
+    healthcheck:
+      <<: *actor-health
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/health"]
+    networks: [guardian-net]
+
+  signer-1:
+    <<: *signer-common
+    volumes: ["signer-1-data:/data"]
+  signer-2:
+    <<: *signer-common
+    volumes: ["signer-2-data:/data"]
+  signer-3:
+    <<: *signer-common
+    volumes: ["signer-3-data:/data"]
+
+  guardian-1:
+    <<: *guardian-common
+    environment:
+      GP_ALLOW_INSECURE_DEMO_DELAY: "true"
+      GP_CORRUPT_CONTRIBUTION: "true"
+      GP_NETWORK_ADMIN_TOKEN: "local-demo-admin-token"
+    volumes: ["guardian-1-data:/data"]
+  guardian-2:
+    <<: *guardian-common
+    volumes: ["guardian-2-data:/data"]
+  guardian-3:
+    <<: *guardian-common
+    volumes: ["guardian-3-data:/data"]
+  guardian-4:
+    <<: *guardian-common
+    volumes: ["guardian-4-data:/data"]
+  guardian-5:
+    <<: *guardian-common
+    volumes: ["guardian-5-data:/data"]
+  guardian-6:
+    <<: *guardian-common
+    volumes: ["guardian-6-data:/data"]
+  guardian-7:
+    <<: *guardian-common
+    volumes: ["guardian-7-data:/data"]
+  guardian-8:
+    <<: *guardian-common
+    volumes: ["guardian-8-data:/data"]
+
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile.network
+    profiles: ["tools"]
+    environment:
+      GP_RELAY_ADMIN_TOKEN: "local-demo-relay-token"
+      GP_NETWORK_ADMIN_TOKEN: "local-demo-admin-token"
+    volumes:
+      - ./demo-data:/demo
+    networks: [guardian-net]
+
+networks:
+  guardian-net:
+    driver: bridge
+
+volumes:
+  relay-data:
+  config-data:
+  signer-1-data:
+  signer-2-data:
+  signer-3-data:
+  guardian-1-data:
+  guardian-2-data:
+  guardian-3-data:
+  guardian-4-data:
+  guardian-5-data:
+  guardian-6-data:
+  guardian-7-data:
+  guardian-8-data:

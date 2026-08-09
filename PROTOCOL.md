@@ -107,6 +107,9 @@ GuardianRecord_i {
 ```
 
 `policy_record` contains only pseudonymous information needed to verify recovery and enforce the delay.
+It pins the signer count as well as the signer threshold and signer-set root so
+a standalone guardian can verify Merkle membership proofs without privileged
+simulator state or a public signer registry.
 
 ### 2.9 Recovery Descriptor
 
@@ -222,6 +225,12 @@ During the delay, threshold-valid signed cancellation votes can form a CancelCer
 
 A guardian that observes a valid cancellation marks the request permanently cancelled.
 
+Each vote includes the signer's pseudonymous public key and Merkle membership
+proof. The guardian verifies that proof against its pinned signer-set
+commitment before counting the signature. A valid cancellation observed before
+Begin is stored as a request-specific tombstone and rejects a later reordered
+Begin.
+
 Each cancellation vote includes a canonical digest of the complete immutable
 RecoveryRequest, binding the vote to its exact recovery recipient, nonce,
 expiry, and crypto suite.
@@ -233,6 +242,10 @@ A signer that has cancelled a request must not sign that request's release phase
 After the delay window, the recovery client obtains the configured signer threshold of fresh release votes bound to the same immutable RecoveryRequest.
 
 These form the ReleaseCertificate.
+
+Each release vote includes the signer's pseudonymous public key and Merkle
+membership proof, allowing every guardian to validate the certificate without
+a public signer registry or privileged simulator state.
 
 A guardian releases only if:
 

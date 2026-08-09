@@ -57,6 +57,8 @@ Wherever possible, keep these values inside end-to-end encrypted payloads rather
 - secret-related slot identifiers.
 
 Outer routing should use only the opaque mailbox/routing material necessary for the current hop.
+Opaque mailbox handles are random values and must not encode actor role,
+guardian/signer index, config id, or another stable protocol identifier.
 
 ## 4. Metadata Modes
 

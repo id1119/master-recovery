@@ -16,7 +16,7 @@ Target runtime: approximately four minutes.
 ## Leg 1 — Setup
 
 1. Enter a secret or choose a small file.
-2. Click `Protect Secret`.
+2. Click `Protect & test recovery`.
 3. Animate:
 
 ```text

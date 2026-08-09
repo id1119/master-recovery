@@ -171,14 +171,26 @@ impl GuardianMachine {
         delay: u64,
         certificate_valid: bool,
     ) -> Result<u64, CoreError> {
+        self.begin_at(request, request_digest, now, now, delay, certificate_valid)
+    }
+
+    pub fn begin_at(
+        &mut self,
+        request: &RecoveryRequest,
+        request_digest: Id32,
+        wall_now: u64,
+        monotonic_now: u64,
+        delay: u64,
+        certificate_valid: bool,
+    ) -> Result<u64, CoreError> {
         self.validate_request(request)?;
         if !certificate_valid {
             return Err(CoreError::FailClosed);
         }
-        if request.requested_at > now {
+        if request.requested_at > wall_now {
             return Err(CoreError::InvalidRequest);
         }
-        if now >= request.expiry {
+        if wall_now >= request.expiry {
             return Err(CoreError::Expired);
         }
         if let Some(cancelled_digest) = self.cancelled.get(&request.request_id) {
@@ -193,7 +205,7 @@ impl GuardianMachine {
         }
         self.seen.insert(request.request_id);
         self.seen_nonces.insert(request.nonce);
-        let not_before = now.saturating_add(delay);
+        let not_before = monotonic_now.saturating_add(delay);
         self.pending.insert(
             request.request_id,
             GuardianPending {
@@ -202,7 +214,7 @@ impl GuardianMachine {
                     config_id: request.config_id,
                     config_version: request.config_version,
                     recipient: request.recovery_recipient_key.clone(),
-                    started_at_monotonic: now,
+                    started_at_monotonic: monotonic_now,
                     not_before,
                     state: RecoveryState::DelayPending,
                 },
@@ -247,6 +259,25 @@ impl GuardianMachine {
         certificate_valid: bool,
         state_unambiguous: bool,
     ) -> Result<(), CoreError> {
+        self.authorize_release_at(
+            request_id,
+            request_digest,
+            now,
+            now,
+            certificate_valid,
+            state_unambiguous,
+        )
+    }
+
+    pub fn authorize_release_at(
+        &mut self,
+        request_id: Id32,
+        request_digest: Id32,
+        wall_now: u64,
+        monotonic_now: u64,
+        certificate_valid: bool,
+        state_unambiguous: bool,
+    ) -> Result<(), CoreError> {
         if let Some(cancelled_digest) = self.cancelled.get(&request_id) {
             return if cancelled_digest == &request_digest {
                 Err(CoreError::Cancelled)
@@ -264,11 +295,11 @@ impl GuardianMachine {
         if pending.request_digest != request_digest {
             return Err(CoreError::RequestMismatch);
         }
-        if now >= pending.expiry {
+        if wall_now >= pending.expiry {
             pending.pending.state = RecoveryState::Expired;
             return Err(CoreError::Expired);
         }
-        if now < pending.pending.not_before {
+        if monotonic_now < pending.pending.not_before {
             return Err(CoreError::DelayNotElapsed);
         }
         pending.pending.state = RecoveryState::Releasing;
@@ -359,6 +390,24 @@ mod tests {
             Err(CoreError::Cancelled)
         );
         assert_eq!(guardian.state(&[2; 32]), Some(RecoveryState::Cancelled));
+    }
+
+    #[test]
+    fn guardian_separates_wall_expiry_from_monotonic_delay() {
+        let recovery = request(1);
+        let digest = [9; 32];
+        let mut guardian = GuardianMachine::new(recovery.config_id, recovery.config_version);
+        let not_before = guardian
+            .begin_at(&recovery, digest, 10, 1_000, 20, true)
+            .unwrap();
+        assert_eq!(not_before, 1_020);
+        assert_eq!(
+            guardian.authorize_release_at(recovery.request_id, digest, 20, 1_019, true, true),
+            Err(CoreError::DelayNotElapsed)
+        );
+        guardian
+            .authorize_release_at(recovery.request_id, digest, 20, 1_020, true, true)
+            .unwrap();
     }
 
     #[test]
