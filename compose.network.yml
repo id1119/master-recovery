@@ -32,34 +32,56 @@ x-signer-common: &signer-common
     test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/health"]
   networks: [guardian-net]
 
+x-relay-common: &relay-common
+  build:
+    context: .
+    dockerfile: Dockerfile.network
+  command: ["serve", "--role", "relay", "--listen", "0.0.0.0:8080", "--data-dir", "/data"]
+  environment:
+    GP_RELAY_ADMIN_TOKEN: "local-demo-relay-token"
+  healthcheck:
+    <<: *actor-health
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/health"]
+  networks: [guardian-net]
+
+x-config-common: &config-common
+  build:
+    context: .
+    dockerfile: Dockerfile.network
+  command: ["serve", "--role", "config-store", "--listen", "0.0.0.0:8080", "--data-dir", "/data"]
+  environment:
+    GP_NETWORK_ADMIN_TOKEN: "local-demo-admin-token"
+  healthcheck:
+    <<: *actor-health
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/health"]
+  networks: [guardian-net]
+
 services:
   relay:
-    build:
-      context: .
-      dockerfile: Dockerfile.network
-    command: ["serve", "--role", "relay", "--listen", "0.0.0.0:8080", "--data-dir", "/data"]
-    environment:
-      GP_RELAY_ADMIN_TOKEN: "local-demo-relay-token"
+    <<: *relay-common
     ports: ["127.0.0.1:9000:8080"]
     volumes: ["relay-data:/data"]
-    healthcheck:
-      <<: *actor-health
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/health"]
-    networks: [guardian-net]
+
+  relay-2:
+    <<: *relay-common
+    volumes: ["relay-2-data:/data"]
+
+  relay-3:
+    <<: *relay-common
+    volumes: ["relay-3-data:/data"]
 
   config-store:
-    build:
-      context: .
-      dockerfile: Dockerfile.network
-    command: ["serve", "--role", "config-store", "--listen", "0.0.0.0:8080", "--data-dir", "/data"]
-    environment:
-      GP_NETWORK_ADMIN_TOKEN: "local-demo-admin-token"
+    <<: *config-common
     ports: ["127.0.0.1:9001:8080"]
     volumes: ["config-data:/data"]
-    healthcheck:
-      <<: *actor-health
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/v1/health"]
-    networks: [guardian-net]
+
+  config-store-2:
+    <<: *config-common
+    volumes: ["config-2-data:/data"]
+
+  config-store-3:
+    <<: *config-common
+    volumes: ["config-3-data:/data"]
 
   signer-1:
     <<: *signer-common
@@ -118,7 +140,11 @@ networks:
 
 volumes:
   relay-data:
+  relay-2-data:
+  relay-3-data:
   config-data:
+  config-2-data:
+  config-3-data:
   signer-1-data:
   signer-2-data:
   signer-3-data:

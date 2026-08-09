@@ -110,7 +110,7 @@ deployment još zahteva TLS ili privatnu overlay mrežu, upravljanje tajnama,
 | Guardian | Čuva jedan fragment ciphertexta i jedan šifrovan deo `DEK` | Da se pristupa jednom njegovom opaque slotu | Identitet vlasnika, plaintext, `A`, otvoreni `DEK` deo i ceo guardian roster |
 | Relay | Prosleđuje opaque šifrovane poruke | Mailbox koji je kontaktiran, sledeći interni node, vreme i veličinu saobraćaja | Sadržaj protokolskih poruka i tajne ključeve |
 | Config store | Objavljuje Config Capsule po nasumičnom `config_id` | Pseudonimnu konfiguraciju, pragove, commitment vrednosti i šifrovani descriptor | Plaintext, `A`, `DEK` i otvoreni guardian roster |
-| Recovery Card | Omogućava novom uređaju da pronađe početne podatke | Config locator, opaque signer mailboxes i owner cancellation javni ključ | Cancellation privatni ključ, ključ za dešifrovanje, guardian roster i tajni sadržaj |
+| Recovery Card | Omogućava novom uređaju da pronađe početne podatke | Config locatore, relay baze, opaque signer mailboxes i owner cancellation javni ključ | Cancellation privatni ključ, ključ za dešifrovanje, guardian roster i tajni sadržaj |
 | Recovery klijent | Vodi recovery i lokalno sklapa rezultat | Na kraju saznaje `A`, `DEK`, guardian roster i plaintext | Na početku nema nijedan originalni tajni ključ |
 
 ## Kriptografski predmeti bez magije
@@ -202,14 +202,14 @@ plaintext postoji u protokolu.
 10. Owner šalje svakom čvoru njegov provisioning zapis kroz direktni
     `POST /v1/provision`. Telo je zapečaćeno za X-Wing ključ tog čvora, a zahtev
     traži administratorski bearer token.
-11. Owner registruje svaki nasumični mailbox kod relaya. Relay pamti mailbox,
-    interni URL čvora i njegov transportni javni ključ. Duplikat ne može da
-    pregazi postojeću rutu.
-12. Config Capsule se upisuje u config store. Capsule sadrži pragove,
+11. Owner registruje svaki nasumični mailbox kod svakog relay replica procesa.
+    Svaki pamti isti mailbox, interni URL čvora i njegov transportni javni
+    ključ. Duplikat ne može da pregazi postojeću rutu.
+12. Isti Config Capsule se upisuje u svaki config-store replica proces. Capsule sadrži pragove,
     commitment vrednosti i šifrovani Recovery Descriptor, ali nema otvoreni
     guardian roster.
-13. Owner lokalno čuva Recovery Card sa config locatorom, opaque signer
-    mailbox adresama i javnim owner cancellation ključem.
+13. Owner lokalno čuva Recovery Card sa config locatorima, relay bazama, opaque
+    signer mailbox adresama i javnim owner cancellation ključem.
 14. Poseban `owner-control.json` sa mode `0600` čuva cancellation privatni ključ
     i guardian rute. Taj fajl nije deo Recovery Carda i ne šalje se mrežnim
     nodeovima.
@@ -272,8 +272,9 @@ Recovery uređaj počinje samo sa Recovery Card podatkom.
 
 ### 1. Bootstrap
 
-Klijent čita `config_id`, Config Capsule locator, signer mailboxes i signer-set
-commitment sa kartice. Zatim javno preuzima Config Capsule iz config storea.
+Klijent čita `config_id`, Config Capsule locatore, relay baze, signer mailboxes
+i signer-set commitment sa kartice. Zatim javno preuzima prvi Capsule koji
+kriptografski odgovara podacima pinovanim na kartici.
 
 ### 2. Sveži primalac
 
@@ -561,7 +562,8 @@ demo-data/recovered-secret.bin
 
 ### Predloženi redosled priče
 
-1. Pokažite topologiju: jedan relay, jedan config store, tri signera i osam
+1. Pokažite topologiju: tri relay replica procesa, tri config-store replica
+   procesa, tri signera i osam
    guardiana. Naglasite da su to odvojeni procesi sa odvojenim diskovima.
 2. Pokrenite setup. Objasnite da plaintext postoji samo u owner procesu i da
    svaki node dobija drugačiji zapečaćeni zapis.
@@ -654,7 +656,7 @@ make network-recover
 | Recovery Descriptor | Privatni spisak guardian ruta, slotova i parametara rekonstrukcije, šifrovan pod `A` |
 | Config Capsule | Javni pseudonimni bootstrap zapis bez plaintexta, ključeva i otvorenog guardian rostera |
 | Recovery Card | Prenosivi locator za nov uređaj, koristan za bootstrap ali nedovoljan za recovery |
-| Owner control | Privatni mode-0600 fajl sa per-config cancellation seed-om i guardian rutama; može samo da otkaže |
+| Owner control | Privatni mode-0600 fajl sa per-config cancellation seed-om, guardian rutama i relay failover bazama; može samo da otkaže |
 | Tombstone | Trajni zapis da je tačan zahtev otkazan i da više ne sme da bude oslobođen |
 | Fail closed | Odbijanje operacije kada stanje ili dokaz nisu jasni i proverljivi |
 | Monotoni sat | Brojač vremena koji ne ide unazad kada se promeni sistemsko wall vreme |

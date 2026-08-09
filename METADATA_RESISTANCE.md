@@ -30,11 +30,17 @@ The guardian roster lives inside the Recovery Descriptor encrypted under A.
 The Recovery Card contains only:
 
 - config id,
-- Config Capsule locator,
+- one or more Config Capsule locators,
 - signer opaque mailbox handles,
-- signer-set commitment.
+- relay replica bases,
+- signer-set commitment,
+- owner cancellation public key.
 
 It is non-confidential but privacy-sensitive.
+
+Relay bases identify shared transport infrastructure, not the hidden guardian
+roster. Guardian mailbox handles remain inside the descriptor encrypted under
+A.
 
 It must not contain:
 

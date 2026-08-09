@@ -3,7 +3,7 @@
 A working hackathon prototype of metadata-resistant, post-quantum-skewed,
 decentralized secret recovery.
 
-The implementation follows `MASTER_PROMPT.md`: an authorization key `A` 
+The implementation follows `MASTER_PROMPT.md`: an authorization key `A` is
 Shamir-shared to signers, the payload is encrypted with a separate `DEK`, and
 guardians receive Reed–Solomon ciphertext fragments plus DEK shares encrypted
 under per-guardian keys derived from `A`. Recovery requires both thresholds,
@@ -33,17 +33,51 @@ make gui
 
 Then open <http://127.0.0.1:8787>.
 
+Run the real multi-process Docker network:
+
+```sh
+make network-demo
+```
+
+This starts three redundant relays, three mirrored config stores, three
+signers, and eight guardians as independent persistent containers, provisions
+them over encrypted network messages, waits on guardian-local monotonic
+delays, rejects an intentionally corrupt guardian, and reconstructs plaintext
+only in the recovery client. Every mailbox route is registered on every relay
+and the Config Capsule is mirrored to every config store, so the client
+fails over when any relay or store is stopped. See
+[`NETWORK_GUIDE.md`](NETWORK_GUIDE.md) for the complete communication model,
+VM commands, APIs, failure demos, and security limitations.
+
+Run `make network-dashboard` for a read-only node/uptime view on
+<http://127.0.0.1:8788>. It is bound to localhost and exposes container health,
+not protocol state or secret material.
+
+Network setup also writes `demo-data/owner-control.json` with mode `0600`.
+That private per-config artifact is the only cancellation authority. It is
+separate from the non-confidential Recovery Card and must not be published.
+
+Owner hard cancellation is protocol v2. Node state files are namespaced by
+protocol version, so existing v1 Docker volumes are left intact but ignored.
+Run `make network-demo` once to provision a fresh v2 Recovery Card and private
+owner-control file. Earlier owner-cancel v2 Cards with one locator remain
+readable and simply operate without replica failover.
+
+For a non-code explanation, presentation script, terminology guide, and twenty
+adversarial defense questions with answers, read
+[`HUMAN_GUIDE_AND_DEFENSE.md`](HUMAN_GUIDE_AND_DEFENSE.md).
+
 The browser uses a compact three-stage flow: create an encrypted backup, save
 the generated Recovery Card, then test recovery on a fresh-client view. The
 verified protocol trace can be played automatically or stepped backward and
 forward one event at a time. The Recovery Card can be copied or downloaded as
-JSON; it contains the config locator and opaque signer mailboxes, never the
-guardian roster or a decryption key.
+JSON; it contains config locators, relay bases and opaque signer mailboxes,
+never the guardian roster or a decryption key.
 
 The backup card accepts either text or a file up to 700 KiB. Safe defaults keep
 the first screen short. **Customize plan and test conditions** exposes every
 simulator control from the design: the three scenarios, signer/guardian counts
-and thresholds, cancellation threshold, offline/corrupt actors, delay,
+and thresholds, owner hard cancellation, offline/corrupt actors, delay,
 metadata mode, latency, loss, duplication, mix drops, cover traffic, replay
 seed, and same-seed mode comparison. Impossible combinations are rejected with
 a specific explanation before protocol execution. File plaintext is shown or
@@ -58,7 +92,7 @@ cargo run -p gp-cli -- demo --seed 424242 --mode strong
 # One corrupted and one offline guardian; replacement still succeeds
 cargo run -p gp-cli -- demo --corrupt-guardian 1 --offline-guardian 2
 
-# Threshold cancellation immediately before release
+# Setup-time owner-key hard cancellation immediately before release
 cargo run -p gp-cli -- cancel --seed 424242
 
 # Compare observer views using the same protocol seed
@@ -83,11 +117,11 @@ Use `0` for a guardian/signer option to disable that adversarial toggle.
 - Exact config version, request id, recipient, nonce, actor index, and request
   digest binding.
 - Deterministic recovery and guardian state machines.
-- Threshold-valid cancellation that permanently kills an observed request.
+- Owner-only hard cancellation using a per-config private key created at setup.
 - Signer-side request-id/nonce replay protection and guardian cancellation
   tombstones that survive Begin/cancel message reordering.
-- Independently verifiable signer Merkle membership in begin, cancellation,
-  and release certificates.
+- Independently verifiable signer Merkle membership in Begin and Release, plus
+  owner cancellation signatures checked against each guardian's pinned key.
 - Malicious/offline guardian replacement and final client-only reconstruction.
 - Successful-recovery rotation to fresh version-2 keys, shares, fragments,
   commitments, and opaque slots.
@@ -123,6 +157,7 @@ gp-sim         seeded end-to-end protocol orchestration
 gp-ipc         versioned CLI/browser command boundary
 gp-gui-sim     local browser gateway and visual lab
 gp-cli         demo, cancellation, comparison, and server commands
+gp-network     real HTTP nodes, Docker network, setup and recovery clients
 ```
 
 `gp-core` performs no filesystem, socket, environment, system-clock, or OS-RNG
@@ -131,13 +166,14 @@ drive every simulator scenario.
 
 ## Security boundaries
 
-The Recovery Card is non-confidential but privacy-sensitive. It contains the
-config locator and opaque signer mailboxes, but no secret key material or
-guardian roster. The roster exists only in the Recovery Descriptor sealed under
-`A`.
+The Recovery Card is non-confidential but privacy-sensitive. It contains
+config locators, relay bases and opaque signer mailboxes, but no secret key
+material or guardian roster. The roster exists only in the Recovery Descriptor
+sealed under `A`.
 
 A compromised signer threshold can authorize a malicious recovery. The delay
-and cancellation path provide a reaction window; they do not make that
+and owner hard-cancel path provide a reaction window while the original owner
+retains its per-config cancellation key; they do not make that
 compromise harmless. Guardians enforce the delay as policy using an injected
 monotonic clock—it is not a trust-free cryptographic timelock.
 

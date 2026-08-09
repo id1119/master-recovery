@@ -209,6 +209,8 @@ pub struct OwnerControlFile {
     pub guardian_count: u16,
     pub guardian_threshold: u16,
     pub guardian_routes: Vec<gp_types::GuardianRoute>,
+    #[serde(default)]
+    pub relay_bases: Vec<String>,
 }
 
 impl Drop for OwnerControlFile {

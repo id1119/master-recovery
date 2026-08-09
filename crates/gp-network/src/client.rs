@@ -27,8 +27,8 @@ use crate::{
 
 pub struct SetupOptions {
     pub secret: Vec<u8>,
-    pub config_store: String,
-    pub relay: String,
+    pub config_stores: Vec<String>,
+    pub relays: Vec<String>,
     pub relay_token: String,
     pub admin_token: String,
     pub signers: Vec<String>,
@@ -55,16 +55,25 @@ pub struct CancelOptions {
 
 pub async fn setup(options: SetupOptions) -> Result<RecoveryCard> {
     let client = reqwest::Client::new();
-    if options.signers.is_empty() || options.guardians.is_empty() {
-        bail!("at least one signer and guardian node is required");
+    if options.signers.is_empty()
+        || options.guardians.is_empty()
+        || options.relays.is_empty()
+        || options.config_stores.is_empty()
+    {
+        bail!("at least one signer, guardian, relay, and config store is required");
     }
+    let relay_bases = options
+        .relays
+        .iter()
+        .map(|relay| relay.trim_end_matches('/').to_string())
+        .collect::<Vec<_>>();
     let signer_count = u16::try_from(options.signers.len())?;
     let guardian_count = u16::try_from(options.guardians.len())?;
     let signer_mailboxes = (0..options.signers.len())
-        .map(|_| mailbox_url(&options.relay))
+        .map(|_| mailbox_url(&relay_bases[0]))
         .collect::<Vec<_>>();
     let guardian_mailboxes = (0..options.guardians.len())
-        .map(|_| mailbox_url(&options.relay))
+        .map(|_| mailbox_url(&relay_bases[0]))
         .collect::<Vec<_>>();
     let policy = SetupPolicy {
         signer_count,
@@ -78,7 +87,8 @@ pub async fn setup(options: SetupOptions) -> Result<RecoveryCard> {
         &policy,
         signer_mailboxes,
         guardian_mailboxes,
-        &options.config_store,
+        &options.config_stores,
+        &relay_bases,
     )?;
     let mut owner_control = OwnerControlFile {
         protocol_version: bundle.capsule.protocol_version,
@@ -93,6 +103,7 @@ pub async fn setup(options: SetupOptions) -> Result<RecoveryCard> {
         guardian_count: bundle.capsule.guardian_count,
         guardian_threshold: bundle.capsule.guardian_threshold,
         guardian_routes: bundle.owner_guardian_routes.clone(),
+        relay_bases: relay_bases.clone(),
     };
 
     println!("SETUP config={}", hex::encode(bundle.capsule.config_id));
@@ -110,15 +121,14 @@ pub async fn setup(options: SetupOptions) -> Result<RecoveryCard> {
             &options.admin_token,
         )
         .await?;
-        register_route(
-            &client,
-            &options.relay,
-            &options.relay_token,
-            mailbox,
-            target,
-        )
-        .await?;
-        println!("  provisioned signer mailbox {}", short_mailbox(mailbox));
+        for relay in &relay_bases {
+            register_route(&client, relay, &options.relay_token, mailbox, target).await?;
+        }
+        println!(
+            "  provisioned signer mailbox {} on {} relay(s)",
+            short_mailbox(mailbox),
+            relay_bases.len()
+        );
     }
     for (target, guardian) in options.guardians.iter().zip(bundle.guardians) {
         let mailbox = guardian.mailbox.clone();
@@ -130,34 +140,37 @@ pub async fn setup(options: SetupOptions) -> Result<RecoveryCard> {
             &options.admin_token,
         )
         .await?;
-        register_route(
-            &client,
-            &options.relay,
-            &options.relay_token,
-            &mailbox,
-            target,
-        )
-        .await?;
-        println!("  provisioned guardian mailbox {}", short_mailbox(&mailbox));
+        for relay in &relay_bases {
+            register_route(&client, relay, &options.relay_token, &mailbox, target).await?;
+        }
+        println!(
+            "  provisioned guardian mailbox {} on {} relay(s)",
+            short_mailbox(&mailbox),
+            relay_bases.len()
+        );
     }
 
     let config_id = hex::encode(bundle.capsule.config_id);
-    let response = client
-        .put(format!(
-            "{}/v1/configs/{config_id}",
-            options.config_store.trim_end_matches('/')
-        ))
-        .bearer_auth(&options.admin_token)
-        .json(&bundle.capsule)
-        .send()
-        .await?;
-    ensure_success(response, "publish Config Capsule").await?;
+    for store in &options.config_stores {
+        let response = client
+            .put(format!(
+                "{}/v1/configs/{config_id}",
+                store.trim_end_matches('/')
+            ))
+            .bearer_auth(&options.admin_token)
+            .json(&bundle.capsule)
+            .send()
+            .await?;
+        ensure_success(response, "publish Config Capsule").await?;
+    }
     write_private_json(Path::new(&options.card_path), &bundle.card)?;
     write_private_json(Path::new(&options.owner_control_path), &owner_control)?;
     zeroize_id(&mut owner_control.owner_cancel_signing_seed);
     println!(
-        "  published Config Capsule and wrote {} plus private owner control {}",
-        options.card_path, options.owner_control_path
+        "  published Config Capsule to {} config store(s) and wrote {} plus private owner control {}",
+        options.config_stores.len(),
+        options.card_path,
+        options.owner_control_path
     );
     Ok(bundle.card)
 }
@@ -232,14 +245,54 @@ async fn register_route(
 pub async fn recover(options: RecoverOptions) -> Result<NetworkDemoResult> {
     let client = reqwest::Client::new();
     let card: RecoveryCard = serde_json::from_slice(&fs::read(&options.card_path)?)?;
-    let capsule = client
-        .get(&card.capsule_locator)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<ConfigCapsule>()
-        .await?;
-    validate_capsule(&card, &capsule)?;
+    let capsule_locators = card.all_capsule_locators();
+    if capsule_locators.is_empty() {
+        bail!("Recovery Card contains no config store locators");
+    }
+    let mut last_store_error: Option<anyhow::Error> = None;
+    let mut capsule = None;
+    for locator in capsule_locators {
+        match client.get(locator).send().await {
+            Ok(response) => {
+                let status = response.status();
+                match response.error_for_status() {
+                    Ok(response) => match response.json::<ConfigCapsule>().await {
+                        Ok(value) => match validate_capsule(&card, &value) {
+                            Ok(()) => {
+                                capsule = Some(value);
+                                println!("  fetched Config Capsule from {locator}");
+                                break;
+                            }
+                            Err(error) => {
+                                last_store_error = Some(error.context(format!(
+                                    "config store {locator} returned a capsule that does not match the Recovery Card"
+                                )))
+                            }
+                        },
+                        Err(error) => last_store_error = Some(error.into()),
+                    },
+                    Err(error) => {
+                        last_store_error = Some(
+                            anyhow::Error::new(error)
+                                .context(format!("config store {locator} responded with {status}")),
+                        )
+                    }
+                }
+            }
+            Err(error) => {
+                last_store_error = Some(
+                    anyhow::Error::new(error)
+                        .context(format!("config store {locator} unreachable")),
+                )
+            }
+        }
+    }
+    let capsule = capsule.ok_or_else(|| {
+        let detail = last_store_error
+            .as_ref()
+            .map_or_else(|| "unknown".to_string(), |error| error.to_string());
+        anyhow::anyhow!("no config store responded: {detail}")
+    })?;
     let recipient = RecipientKeyPair::from_seed(random_id());
     let now = wall_now()?;
     let request = RecoveryRequest {
@@ -261,9 +314,10 @@ pub async fn recover(options: RecoverOptions) -> Result<NetworkDemoResult> {
 
     let mut signer_contributions = Vec::new();
     for mailbox in &card.signer_mailboxes {
-        match send_mailbox(
+        match send_mailbox_mirrored(
             &client,
             mailbox,
+            &card.relay_bases,
             &MailboxRequest::SignerApprove {
                 request: request.clone(),
             },
@@ -298,9 +352,10 @@ pub async fn recover(options: RecoverOptions) -> Result<NetworkDemoResult> {
 
     let mut begin_count = 0_usize;
     for route in &descriptor.guardians {
-        match send_mailbox(
+        match send_mailbox_mirrored(
             &client,
             &route.mailbox,
+            &card.relay_bases,
             &MailboxRequest::GuardianBegin {
                 certificate: begin.clone(),
             },
@@ -328,9 +383,10 @@ pub async fn recover(options: RecoverOptions) -> Result<NetworkDemoResult> {
         // a hostile recovery client racing an older certificate against the owner tombstone.
         let mut pre_cancel_release_votes = Vec::new();
         for mailbox in &card.signer_mailboxes {
-            if let Ok(MailboxResponse::ReleaseVote(vote)) = send_mailbox(
+            if let Ok(MailboxResponse::ReleaseVote(vote)) = send_mailbox_mirrored(
                 &client,
                 mailbox,
+                &card.relay_bases,
                 &MailboxRequest::SignerRelease {
                     request: request.clone(),
                 },
@@ -359,6 +415,7 @@ pub async fn recover(options: RecoverOptions) -> Result<NetworkDemoResult> {
             || owner_control.guardian_count != capsule.guardian_count
             || owner_control.guardian_threshold != capsule.guardian_threshold
             || owner_control.guardian_routes != descriptor.guardians
+            || owner_control.relay_bases != card.relay_bases
         {
             bail!("owner control file does not match this recovery configuration");
         }
@@ -374,9 +431,10 @@ pub async fn recover(options: RecoverOptions) -> Result<NetworkDemoResult> {
         let certificate = certificate_result?;
         let mut cancelled_guardians = BTreeSet::new();
         for route in &descriptor.guardians {
-            if let Ok(MailboxResponse::CancellationAccepted(ack)) = send_mailbox(
+            if let Ok(MailboxResponse::CancellationAccepted(ack)) = send_mailbox_mirrored(
                 &client,
                 &route.mailbox,
+                &card.relay_bases,
                 &MailboxRequest::GuardianCancel {
                     request: request.clone(),
                     certificate: Box::new(certificate.clone()),
@@ -406,9 +464,10 @@ pub async fn recover(options: RecoverOptions) -> Result<NetworkDemoResult> {
         .await;
         let mut observed_refusal = false;
         for route in &descriptor.guardians {
-            match send_mailbox(
+            match send_mailbox_mirrored(
                 &client,
                 &route.mailbox,
+                &card.relay_bases,
                 &MailboxRequest::GuardianRelease {
                     request: request.clone(),
                     certificate: raced_release.clone(),
@@ -456,9 +515,10 @@ pub async fn recover(options: RecoverOptions) -> Result<NetworkDemoResult> {
 
     let mut release_votes = Vec::new();
     for mailbox in &card.signer_mailboxes {
-        match send_mailbox(
+        match send_mailbox_mirrored(
             &client,
             mailbox,
+            &card.relay_bases,
             &MailboxRequest::SignerRelease {
                 request: request.clone(),
             },
@@ -485,9 +545,10 @@ pub async fn recover(options: RecoverOptions) -> Result<NetworkDemoResult> {
     let mut dek_shares = Vec::new();
     let mut rejected = Vec::new();
     for route in &descriptor.guardians {
-        match send_mailbox(
+        match send_mailbox_mirrored(
             &client,
             &route.mailbox,
+            &card.relay_bases,
             &MailboxRequest::GuardianRelease {
                 request: request.clone(),
                 certificate: release.clone(),
@@ -586,9 +647,10 @@ pub async fn cancel(options: CancelOptions) -> Result<OwnerCancelResult> {
     let certificate = certificate_result?;
     let mut acknowledgements = BTreeSet::new();
     for route in &owner_control.guardian_routes {
-        if let Ok(MailboxResponse::CancellationAccepted(ack)) = send_mailbox(
+        if let Ok(MailboxResponse::CancellationAccepted(ack)) = send_mailbox_mirrored(
             &client,
             &route.mailbox,
+            &owner_control.relay_bases,
             &MailboxRequest::GuardianCancel {
                 request: request.clone(),
                 certificate: Box::new(certificate.clone()),
@@ -624,6 +686,45 @@ fn required_cancel_acks(total_guardians: usize, recovery_threshold: usize) -> Re
         bail!("invalid guardian threshold in owner control state");
     }
     Ok(total_guardians - recovery_threshold + 1)
+}
+
+async fn send_mailbox_mirrored(
+    client: &reqwest::Client,
+    mailbox: &str,
+    relays: &[String],
+    action: &MailboxRequest,
+    recipient: &RecipientKeyPair,
+) -> Result<MailboxResponse> {
+    let mut last_error: Option<anyhow::Error> = None;
+    let mut tried = 0_usize;
+    for candidate in mailbox_replicas(mailbox, relays) {
+        tried += 1;
+        match send_mailbox(client, &candidate, action, recipient).await {
+            Ok(response) => return Ok(response),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    match last_error {
+        Some(error) => Err(error.context(format!(
+            "mailbox {} unreachable via {tried} relay replica(s)",
+            short_mailbox(mailbox)
+        ))),
+        None => bail!("no relay replicas configured"),
+    }
+}
+
+fn mailbox_replicas(mailbox: &str, relay_bases: &[String]) -> Vec<String> {
+    let mut replicas = vec![mailbox.to_string()];
+    let Ok(id) = mailbox_id(mailbox) else {
+        return replicas;
+    };
+    for base in relay_bases {
+        let candidate = format!("{}/v1/mailboxes/{}", base.trim_end_matches('/'), id);
+        if !replicas.contains(&candidate) {
+            replicas.push(candidate);
+        }
+    }
+    replicas
 }
 
 async fn send_mailbox(
@@ -725,7 +826,7 @@ fn write_private_json(path: &Path, value: &impl serde::Serialize) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use super::required_cancel_acks;
+    use super::{mailbox_replicas, required_cancel_acks};
 
     #[test]
     fn hard_cancel_requires_enough_tombstones_to_break_recovery_quorum() {
@@ -734,5 +835,24 @@ mod tests {
         assert_eq!(required_cancel_acks(8, 1).unwrap(), 8);
         assert!(required_cancel_acks(8, 0).is_err());
         assert!(required_cancel_acks(3, 4).is_err());
+    }
+
+    #[test]
+    fn relay_failover_preserves_the_opaque_mailbox_id_without_duplicates() {
+        let mailbox = "http://relay-1/v1/mailboxes/0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            mailbox_replicas(
+                mailbox,
+                &[
+                    "http://relay-1".into(),
+                    "http://relay-2/".into(),
+                    "http://relay-2".into(),
+                ],
+            ),
+            vec![
+                mailbox.to_string(),
+                "http://relay-2/v1/mailboxes/0123456789abcdef0123456789abcdef".into(),
+            ]
+        );
     }
 }

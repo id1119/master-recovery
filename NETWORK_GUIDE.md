@@ -62,11 +62,12 @@ The `gp-network setup` command is an ephemeral client. It:
    opaque mailbox ids, and commitments;
 3. encrypts the secret locally;
 4. seals each node's provisioning record to that node;
-5. registers random mailbox routes at the relay;
-6. publishes the non-secret Config Capsule;
+5. registers each random mailbox route at every configured relay replica;
+6. publishes the identical non-secret Config Capsule to every configured
+   config-store replica;
 7. writes the privacy-sensitive Recovery Card;
 8. writes a separate mode-0600 owner-control file containing the per-config
-   cancellation private key and private guardian routes.
+   cancellation private key, private guardian routes, and relay failover bases.
 
 The setup client exits after distribution. A and DEK are held in zeroizing
 buffers while setup is running and are not written to the Recovery Card.
@@ -77,7 +78,9 @@ This owner-cancel design is protocol v2. Persistent node-state filenames carry
 the protocol version, so old v1 state remains on disk but is not loaded as v2.
 After upgrading, run setup again to create a v2 Recovery Card and owner-control
 file. There is deliberately no migration that invents a cancellation private
-key for an old configuration.
+key for an old configuration. Recovery Cards created before the
+redundant-locator merge remain readable, but naturally operate through only
+their original single endpoint.
 
 ### 2.2 Relay
 
@@ -200,12 +203,21 @@ request. The hard cancel is intentionally not retroactive.
 `compose.network.yml` starts:
 
 ```text
-1 relay
-1 config store
+3 relay services (relay, relay-2, relay-3)
+3 config store services (config-store, config-store-2, config-store-3)
 3 independent signer containers
 8 independent guardian containers
 1 ephemeral setup/recovery client image
 ```
+
+Every mailbox route is registered at every relay, and the Config Capsule is
+published to every config store. The Recovery Card carries all config store
+locators and all relay bases. The recovery client accepts the first Capsule
+that validates against the card and routes each mailbox message through the
+first relay replica that returns a valid response, retrying when a replica is
+stopped or unreachable. This removes one relay or one config store as a single
+availability dependency. It does not claim consensus between replicas or
+guarantee recovery after a request reached a node but its response was lost.
 
 Only two services are published to the host:
 
@@ -217,6 +229,12 @@ Only two services are published to the host:
 Signer and guardian HTTP ports exist only on the private Compose bridge. Their
 state lives in separate named volumes. `guardian-1` is intentionally configured
 to corrupt its released fragment so replacement behavior is visible.
+
+For a read-only operational view, run `make network-dashboard` and open
+`http://127.0.0.1:8788`. The dashboard binds only to localhost, invokes Docker
+without a shell, and reports container health, uptime, restart count and memory
+usage. It does not read node state volumes, Recovery Cards or owner-control
+files and exposes no mutation endpoint.
 
 ## 4. Quick start
 
@@ -723,8 +741,9 @@ Inspect the Recovery Card:
 jq . demo-data/recovery-card.json
 ```
 
-It should contain config id, Config Capsule locator, signer mailbox URLs and
-signer-set commitment. It must not contain a guardian field.
+It should contain config id, Config Capsule locators, relay bases, signer
+mailbox URLs, signer-set commitment and the owner cancellation public key. It
+must not contain a guardian field or any private key.
 
 Inspect relay persistence inside its container only for debugging:
 
@@ -749,10 +768,14 @@ Important limitations:
 3. A threshold of compromised signers can authorize recovery and reconstruct A.
 4. A threshold of compromised guardians can ignore their delay policy, though
    their stored DEK shares still require A.
-5. The relay can drop all messages and prevent availability.
+5. Any individual relay can drop all messages and prevent recovery while it is
+   the client's selected replica; the client fails over to its other registered
+   relay replicas, so availability depends on relay redundancy, not on a single
+   relay.
 6. A global observer still sees endpoints, timing, volume and approximate
    message sizes.
-7. One relay is not a mixnet and provides no strong anonymity claim.
+7. A relay hop is a direct forwarding hop, not a mixnet, and provides no
+   strong anonymity claim.
 8. Node state needs encrypted volumes, secret management, backups, OS hardening
    and access control before carrying valuable secrets.
 9. The Compose administration tokens are demo defaults and must be replaced.

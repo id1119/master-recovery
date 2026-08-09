@@ -179,10 +179,33 @@ pub struct ConfigCapsule {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RecoveryCard {
     pub config_id: Id32,
-    pub capsule_locator: String,
+    /// Locators for all redundant config stores that mirror the Config Capsule.
+    #[serde(default)]
+    pub capsule_locators: Vec<String>,
+    /// Backward-compatible single locator used by early protocol-v2 cards.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capsule_locator: Option<String>,
     pub signer_mailboxes: Vec<String>,
+    /// Relay bases that mirror every mailbox route; a client fails over across them.
+    #[serde(default)]
+    pub relay_bases: Vec<String>,
     pub signer_set_commitment: Id32,
     pub owner_cancel_public_key: [u8; 32],
+}
+
+impl RecoveryCard {
+    pub fn all_capsule_locators(&self) -> Vec<&str> {
+        let mut locators = Vec::new();
+        if let Some(locator) = self.capsule_locator.as_deref() {
+            locators.push(locator);
+        }
+        for locator in &self.capsule_locators {
+            if !locators.contains(&locator.as_str()) {
+                locators.push(locator);
+            }
+        }
+        locators
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

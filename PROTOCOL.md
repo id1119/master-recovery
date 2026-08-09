@@ -156,12 +156,18 @@ Publish/redundantly store the pseudonymous Config Capsule containing:
 Create a privacy-sensitive, non-confidential locator containing:
 
 - config id,
-- Config Capsule locator,
+- one or more Config Capsule locators,
 - signer opaque mailbox handles,
+- relay replica bases for retrying the same opaque mailbox ids,
 - signer-set commitment,
 - per-config owner cancellation public key.
 
 It contains no secret key material and no guardian roster.
+
+When several Config Capsule replicas are listed, the client validates each
+candidate against the card and ignores unavailable, malformed, or mismatched
+replicas. Mirrored relays carry the same opaque mailbox routes; replication
+does not move stable protocol identifiers into outer headers.
 
 ## 3. Recovery
 

@@ -791,11 +791,13 @@ fn setup_world(
     };
     let card = RecoveryCard {
         config_id,
-        capsule_locator: format!("config://{}", hex::encode(config_id)),
+        capsule_locators: vec![format!("config://{}", hex::encode(config_id))],
+        capsule_locator: None,
         signer_mailboxes: signers
             .iter()
             .map(|signer| signer.mailbox.clone())
             .collect(),
+        relay_bases: vec![],
         signer_set_commitment: signer_root,
         owner_cancel_public_key,
     };

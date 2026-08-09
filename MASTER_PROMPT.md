@@ -400,7 +400,10 @@ ConfigCapsule {
 
 It contains no A, no DEK, no plaintext secret, and no plaintext guardian roster.
 
-For the hackathon, the Config Capsule is stored redundantly by the protocol's config-store process and is retrievable using the Recovery Card's locator/config id.
+For the hackathon, the Config Capsule is mirrored byte-for-byte across one or
+more config-store processes and is retrievable using the Recovery Card's
+locators/config id. A client accepts only a replica whose Capsule validates
+against the commitments and owner cancellation public key pinned on the card.
 
 ### Recovery Descriptor
 
@@ -453,13 +456,18 @@ During setup create a small Recovery Card as a QR/string containing:
 
 ```text
 config_id
-config-capsule locator
+one or more config-capsule locators
 signer opaque mailbox handles
+relay replica bases used only to retry the same opaque mailbox id
 signer_set_commitment
 owner_cancel_public_key
 ```
 
 The Recovery Card is **non-confidential but privacy-sensitive**.
+
+Relay replication does not make the guardian roster public. The card exposes
+relay infrastructure and signer mailbox handles, while guardian mailbox ids
+remain inside the Recovery Descriptor sealed under A.
 
 It contains no A share, DEK share, guardian roster, plaintext secret, decryption key, or owner cancellation private key. Stealing it should not be sufficient to recover a secret, but it can reveal pseudonymous recovery-locator metadata and can be used for spam/phishing attempts against signer mailboxes.
 
