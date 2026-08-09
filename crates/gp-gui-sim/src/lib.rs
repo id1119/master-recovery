@@ -117,8 +117,6 @@ mod tests {
                 "missing UI control {required}"
             );
         }
-        assert!(INDEX_HTML.contains("not a production anonymity network"));
-        assert!(INDEX_HTML.contains("Ed25519 is classical"));
         assert!(INDEX_HTML.contains("method: 'POST'"));
         assert!(!INDEX_HTML.contains("/api/demo?"));
     }

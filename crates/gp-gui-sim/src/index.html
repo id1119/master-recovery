@@ -190,6 +190,23 @@
     .icon-button { padding: 6px 9px; border: 1px solid var(--border); border-radius: 7px; background: #fff; cursor: pointer; font-size: 10px; }
     .counter { color: var(--muted); font: 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
 
+    .graph-card { margin-top: 12px; overflow: hidden; color: #e9f0ec; background: #14211d; border-color: #14211d; }
+    .graph-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #ffffff12; }
+    .graph-head b { font-size: 12px; }
+    .graph-head span { color: #92a39b; font: 9px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .graph-wrap { padding: 8px 12px; overflow-x: auto; }
+    #networkGraph { display: block; width: 100%; min-width: 620px; height: auto; }
+    .gnode rect { fill: #1d2c27; stroke: #ffffff1c; stroke-width: 1; }
+    .gnode.required rect { stroke: #73b99b5c; }
+    .gnode.bad rect { stroke: #c65c4880; fill: #26211f; }
+    .gnode.offline rect { opacity: .5; }
+    .gname { fill: #e9f0ec; font-size: 12px; font-weight: 600; }
+    .gsub { fill: #92a39b; font-size: 9px; }
+    .gnode.bad .gsub { fill: #d99183; }
+    .gedge { stroke: #ffffff12; stroke-width: 1; }
+    .gdot { fill: #a9d3c2; }
+    .graph-foot { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 0 18px 14px; color: #92a39b; font-size: 9px; }
+
     .result-grid { display: grid; grid-template-columns: 1.25fr .75fr; gap: 12px; margin-top: 12px; }
     .result-box { padding: 18px; }
     .result-box h3 { margin-bottom: 4px; font-size: 12px; }
@@ -349,6 +366,12 @@
         <div class="playback"><div class="playback-buttons"><button class="icon-button" id="previousButton" type="button">← Back</button><button class="icon-button" id="playButton" type="button">Pause</button><button class="icon-button" id="nextButton" type="button">Next →</button></div><span class="counter" id="eventCounter">0 / 0</span></div>
       </section>
 
+      <section class="card graph-card">
+        <div class="graph-head"><b>Packet flow</b><span id="graphCaption">Waiting for observer trace…</span></div>
+        <div class="graph-wrap"><svg id="networkGraph" role="img" aria-label="Simulated packet flow across the recovery network"></svg></div>
+        <div class="graph-foot"><span>Dots are observer-visible packets; real and cover cells are indistinguishable.</span><span>Mix hops come from the trace; endpoint attachment is a visual assignment.</span></div>
+      </section>
+
       <div class="result-grid">
         <section class="card result-box"><h3>Recovered on this client</h3><p>Only displayed after both thresholds and all integrity checks succeed.</p><div class="output" id="recoveredOutput">Waiting for reconstruction…</div><button class="link-button download" id="downloadButton" type="button">Download recovered file</button></section>
         <section class="card result-box"><h3>Responses</h3><p>Invalid and missing contributions are replaced.</p><div class="participant-list" id="participantGrid"></div></section>
@@ -375,7 +398,7 @@
     };
     const numberValue = id => Number(byId(id).value);
 
-    function showView(id) { for (const view of document.querySelectorAll('.view')) view.classList.toggle('active', view.id === id); byId('navBackup').classList.toggle('active', id === 'backupView'); byId('navRecovery').classList.toggle('active', id !== 'backupView'); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+    function showView(id) { for (const view of document.querySelectorAll('.view')) view.classList.toggle('active', view.id === id); byId('navBackup').classList.toggle('active', id === 'backupView'); byId('navRecovery').classList.toggle('active', id !== 'backupView'); if (id === 'resultSection') startGraphAnimation(); else stopGraphAnimation(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
     function makeOption(label, value) { const option = document.createElement('option'); option.textContent = label; option.value = String(value); return option; }
     function fillActorSelect(id, count, preferred, noun) { const select = byId(id), previous = preferred ?? Number(select.value || 0); select.replaceChildren(makeOption('None', 0)); for (let i = 1; i <= count; i++) select.appendChild(makeOption(`${noun} ${i}`, i)); select.value = String(previous <= count ? previous : 0); }
     function syncActorControls(preferred = {}) { const s = Math.max(1, numberValue('signerCount')), g = Math.max(1, numberValue('guardianCount')); byId('signerThreshold').max = s; byId('signerThreshold').value = Math.min(numberValue('signerThreshold'), s); byId('cancelThreshold').max = s; byId('cancelThreshold').value = Math.min(numberValue('cancelThreshold'), s); byId('guardianThreshold').max = g; byId('guardianThreshold').value = Math.min(numberValue('guardianThreshold'), g); fillActorSelect('offlineSigner', s, preferred.offlineSigner, 'Signer'); fillActorSelect('offlineGuardian', g, preferred.offlineGuardian, 'Guardian'); fillActorSelect('corruptGuardian', g, preferred.corruptGuardian, 'Guardian'); renderPlanSummary(); }
@@ -399,12 +422,116 @@
     function moveEvent(delta) { if (!latestResult) return; stopPlayback(); eventCursor = Math.max(0, Math.min(latestResult.events.length - 1, eventCursor + delta)); renderResult(); }
     function phaseStep(phase) { return ({ SETUP: 0, RECOVERY: 1, DELAY: 2, RELEASE: 3, CANCEL: 3, COMPLETE: 4, ROTATE: 5 })[phase] ?? 0; }
 
-    function renderResult() { const event = latestResult.events[eventCursor], stepIndex = phaseStep(event.phase), info = phaseInfo[event.phase] || [event.actor, event.message]; document.querySelectorAll('.step').forEach(step => { const n = Number(step.dataset.step); step.classList.toggle('done', n < stepIndex); step.classList.toggle('current', n === stepIndex); }); byId('eventPhase').textContent = event.phase; byId('eventTitle').textContent = info[0]; byId('eventMessage').textContent = event.message; byId('cryptoMessage').textContent = info[1]; byId('eventCounter').textContent = `${eventCursor + 1} / ${latestResult.events.length}`; byId('requestBindingFact').textContent = `Recipient pinned · ${latestResult.request_id_hex.slice(0, 10)}…`; byId('approvalFact').textContent = `${latestResult.signer_threshold} of ${numberValue('signerCount')} signers · ${String(latestResult.mode).toUpperCase()}`; byId('guardianFact').textContent = latestResult.cancelled ? 'Release blocked · no shares' : `${latestResult.valid_guardians} valid · ${latestResult.rejected_guardians.length} rejected`; const state = [...latestResult.events.slice(0, eventCursor + 1)].reverse().find(item => item.state)?.state || 'Created', final = eventCursor === latestResult.events.length - 1; byId('statePill').textContent = state; byId('statePill').className = `state${final && latestResult.success ? ' success' : final && latestResult.cancelled ? ' cancelled' : ''}`; byId('resultTitle').textContent = final && latestResult.success ? 'Recovery completed' : final && latestResult.cancelled ? 'Recovery cancelled' : 'Recovery test'; byId('resultSubtitle').textContent = final && latestResult.success ? `${latestResult.valid_guardians} valid guardian responses reconstructed the secret.` : final && latestResult.cancelled ? 'Honest guardians refused release; no plaintext was reconstructed.' : `Verified event ${eventCursor + 1} of ${latestResult.events.length}.`; renderOutput(stepIndex); renderParticipants(); renderObserver(); renderArtifacts(stepIndex); renderLog(); }
+    function renderResult() { const event = latestResult.events[eventCursor], stepIndex = phaseStep(event.phase), info = phaseInfo[event.phase] || [event.actor, event.message]; document.querySelectorAll('.step').forEach(step => { const n = Number(step.dataset.step); step.classList.toggle('done', n < stepIndex); step.classList.toggle('current', n === stepIndex); }); byId('eventPhase').textContent = event.phase; byId('eventTitle').textContent = info[0]; byId('eventMessage').textContent = event.message; byId('cryptoMessage').textContent = info[1]; byId('eventCounter').textContent = `${eventCursor + 1} / ${latestResult.events.length}`; byId('requestBindingFact').textContent = `Recipient pinned · ${latestResult.request_id_hex.slice(0, 10)}…`; byId('approvalFact').textContent = `${latestResult.signer_threshold} of ${numberValue('signerCount')} signers · ${String(latestResult.mode).toUpperCase()}`; byId('guardianFact').textContent = latestResult.cancelled ? 'Release blocked · no shares' : `${latestResult.valid_guardians} valid · ${latestResult.rejected_guardians.length} rejected`; const state = [...latestResult.events.slice(0, eventCursor + 1)].reverse().find(item => item.state)?.state || 'Created', final = eventCursor === latestResult.events.length - 1; byId('statePill').textContent = state; byId('statePill').className = `state${final && latestResult.success ? ' success' : final && latestResult.cancelled ? ' cancelled' : ''}`; byId('resultTitle').textContent = final && latestResult.success ? 'Recovery completed' : final && latestResult.cancelled ? 'Recovery cancelled' : 'Recovery test'; byId('resultSubtitle').textContent = final && latestResult.success ? `${latestResult.valid_guardians} valid guardian responses reconstructed the secret.` : final && latestResult.cancelled ? 'Honest guardians refused release; no plaintext was reconstructed.' : `Verified event ${eventCursor + 1} of ${latestResult.events.length}.`; renderOutput(stepIndex); renderParticipants(); renderObserver(); renderArtifacts(stepIndex); renderLog(); renderGraph(stepIndex); }
     function renderOutput(step) { const output = byId('recoveredOutput'), download = byId('downloadButton'); download.style.display = 'none'; download.onclick = null; if (!latestResult.success || step < 4) { output.textContent = latestResult.cancelled && eventCursor === latestResult.events.length - 1 ? 'Cancelled — no plaintext reconstructed.' : 'Waiting for reconstruction…'; return; } const secret = latestResult.recovered_secret || ''; if (!secret.startsWith('GPFILE1:')) { output.textContent = secret; return; } try { const file = JSON.parse(secret.slice(8)); output.textContent = `Recovered file: ${file.name}`; download.style.display = 'inline'; download.textContent = `Download ${file.name}`; download.onclick = () => { const raw = atob(file.data), bytes = Uint8Array.from(raw, c => c.charCodeAt(0)), url = URL.createObjectURL(new Blob([bytes], { type: file.type || 'application/octet-stream' })), anchor = document.createElement('a'); anchor.href = url; anchor.download = file.name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }; } catch { output.textContent = 'Recovered file wrapper could not be decoded.'; } }
     function renderParticipants() { const grid = byId('participantGrid'); grid.replaceChildren(); const os = numberValue('offlineSigner'), rejected = latestResult?.rejected_guardians || []; const signer = document.createElement('div'); signer.className = 'participant good'; signer.textContent = `${latestResult?.signer_threshold || numberValue('signerThreshold')} signer approvals verified`; grid.appendChild(signer); if (os) { const node = document.createElement('div'); node.className = 'participant offline'; node.textContent = `Signer ${os} unavailable`; grid.appendChild(node); } if (rejected.length) for (const id of rejected) { const node = document.createElement('div'); node.className = 'participant bad'; node.textContent = `Guardian ${id} rejected / missing`; grid.appendChild(node); } else { const node = document.createElement('div'); node.className = 'participant good'; node.textContent = 'Guardian responses valid'; grid.appendChild(node); } }
     function renderObserver() { if (!latestResult) return; const o = latestResult.observer; byId('observedMetric').textContent = o.total_observed_packets; byId('coverMetric').textContent = o.cover_packets; byId('droppedMetric').textContent = o.dropped_packets; byId('duplicatedMetric').textContent = o.duplicated_packets; byId('bucketMetric').textContent = o.packets[0] ? `${o.packets[0].size_bucket}B` : '—'; byId('leakageText').textContent = o.remaining_leakage; const chart = byId('packetChart'); chart.replaceChildren(); if (!o.packets.length) { chart.textContent = 'All simulated packets were dropped.'; return; } for (const packet of o.packets.slice(0, 120)) { const bar = document.createElement('i'); bar.className = 'packet'; bar.style.height = `${10 + packet.timestamp_ms % 53}px`; bar.title = `t=${packet.timestamp_ms}ms · ${packet.size_bucket}B · ${packet.previous_hop} → ${packet.next_hop}`; chart.appendChild(bar); } }
     function renderArtifacts(step) { const id = latestResult.config_id_hex; byId('cardArtifact').textContent = `Config locator ${id.slice(0, 12)}… plus opaque signer handles; no guardian roster.`; byId('configArtifact').textContent = `Config ${id.slice(0, 16)}… · version ${latestResult.rotated_config_version && step >= 5 ? 2 : 1}.`; byId('descriptorArtifact').textContent = step >= 1 ? 'Decrypted only on this recovery client after reconstructing A.' : 'Guardian roster remains sealed under A.'; }
     function renderLog() { const log = byId('eventLog'); log.replaceChildren(); for (const event of latestResult.events.slice(0, eventCursor + 1)) { const row = document.createElement('div'); row.className = 'log-row'; const name = document.createElement('b'); name.textContent = `${event.phase} · ${event.actor}`; const message = document.createElement('span'); message.textContent = event.message; row.append(name, message); log.appendChild(row); } }
+
+    const GRAPH_NS = 'http://www.w3.org/2000/svg', GRAPH_PERIOD = 7000, GRAPH_TRAVEL = 1150, GRAPH_MAX_DOTS = 150;
+    let graphModel = null, graphFrame = null, graphSignature = '';
+
+    function svgEl(name, attrs) { const node = document.createElementNS(GRAPH_NS, name); for (const key in attrs) node.setAttribute(key, attrs[key]); return node; }
+    function hashText(text) { let hash = 2166136261; for (let i = 0; i < text.length; i++) { hash ^= text.charCodeAt(i); hash = Math.imul(hash, 16777619); } return hash >>> 0; }
+    function guardianStatus(index, step) { if (numberValue('offlineGuardian') === index) return 'Offline'; if ((latestResult.rejected_guardians || []).includes(index)) return step >= 3 ? 'Rejected' : 'Holding'; if (latestResult.cancelled && step >= 3) return 'Release blocked'; if (step >= 4) return 'Released'; if (step >= 3) return 'Releasable'; if (step >= 2) return 'Delay pending'; return 'Holding'; }
+    function signerStatus(index, step) { return numberValue('offlineSigner') === index ? 'Offline' : step >= 1 ? 'Approved' : 'Idle'; }
+
+    function buildGraph() {
+      const svg = byId('networkGraph');
+      svg.replaceChildren();
+      graphModel = null;
+      const signerCount = numberValue('signerCount'), guardianCount = numberValue('guardianCount');
+      const allPackets = latestResult.observer.packets || [];
+      const mixNames = [...new Set(allPackets.flatMap(packet => [packet.previous_hop, packet.next_hop]).filter(hop => hop.startsWith('mix-')))].sort((a, b) => Number(a.slice(4)) - Number(b.slice(4)));
+      const mixes = mixNames.length ? mixNames : ['mix-1'];
+      const width = 1200, rowGap = 58;
+      const height = Math.max(400, Math.max(signerCount + 2, guardianCount, mixes.length) * rowGap + 90);
+      svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+      svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+
+      const column = (count, cx, kind, label) => { const gap = Math.min(rowGap, (height - 90) / Math.max(count, 1)); return Array.from({ length: count }, (_, i) => ({ id: `${kind}-${i + 1}`, index: i + 1, kind, cx, cy: height / 2 + (i - (count - 1) / 2) * gap, label: `${label} ${i + 1}` })); };
+      const signers = column(signerCount, 330, 'signer', 'Signer');
+      const guardians = column(guardianCount, 890, 'guardian', 'Guardian');
+      const mixGap = Math.min(rowGap * 2.2, (height - 100) / Math.max(mixes.length, 1));
+      const mixNodes = mixes.map((name, i) => ({ id: name, index: i, kind: 'mix', cx: 610, cy: height / 2 + (i - (mixes.length - 1) / 2) * mixGap, label: `Mix ${name.slice(4)}` }));
+      const owner = { id: 'owner', index: 0, kind: 'owner', cx: 100, cy: height / 2 - 70, label: 'Owner' };
+      const config = { id: 'config', index: 0, kind: 'config', cx: 100, cy: height / 2 + 130, label: 'Config store' };
+      const recovery = { id: 'recovery', index: 0, kind: 'recovery', cx: 1100, cy: height / 2, label: 'Recovery device' };
+      const nodes = [owner, config, ...signers, ...mixNodes, ...guardians, recovery];
+      const byNodeId = new Map(nodes.map(node => [node.id, node]));
+
+      const sources = [owner.id, config.id, ...signers.map(node => node.id)];
+      const edges = [];
+      for (const source of sources) for (const mix of mixNodes) edges.push([source, mix.id]);
+      for (const mix of mixNodes) for (const guardian of guardians) if (guardians.length <= 12 || hashText(mix.id + guardian.id) % 3 === 0) edges.push([mix.id, guardian.id]);
+      for (const guardian of guardians) edges.push([guardian.id, recovery.id]);
+
+      const edgeLayer = svgEl('g', {}), dotLayer = svgEl('g', {}), nodeLayer = svgEl('g', {});
+      for (const [from, to] of edges) { const a = byNodeId.get(from), b = byNodeId.get(to); if (a && b) edgeLayer.appendChild(svgEl('line', { class: 'gedge', x1: a.cx, y1: a.cy, x2: b.cx, y2: b.cy })); }
+      for (const node of nodes) {
+        const group = svgEl('g', { class: `gnode ${node.kind}` });
+        group.appendChild(svgEl('rect', { x: node.cx - 95, y: node.cy - 24, width: 190, height: 48, rx: 9 }));
+        const name = svgEl('text', { class: 'gname', x: node.cx, y: node.cy - 1, 'text-anchor': 'middle' });
+        name.textContent = node.label;
+        const sub = svgEl('text', { class: 'gsub', x: node.cx, y: node.cy + 14, 'text-anchor': 'middle' });
+        group.append(name, sub);
+        nodeLayer.appendChild(group);
+        node.group = group; node.subText = sub;
+      }
+
+      const packets = allPackets.slice(0, GRAPH_MAX_DOTS), dots = [];
+      const stamps = packets.map(packet => packet.timestamp_ms);
+      const earliest = stamps.length ? Math.min(...stamps) : 0, span = Math.max(1, (stamps.length ? Math.max(...stamps) : 1) - earliest);
+      for (const packet of packets) {
+        const tag = packet.mailbox_tag || `${packet.timestamp_ms}`;
+        const fromId = packet.previous_hop === 'opaque-client' ? sources[hashText(tag) % sources.length] : packet.previous_hop;
+        const toId = packet.next_hop === 'opaque-mailbox' ? guardians[hashText(`${tag}#g`) % guardians.length].id : packet.next_hop;
+        const from = byNodeId.get(fromId), to = byNodeId.get(toId);
+        if (!from || !to) continue;
+        const circle = svgEl('circle', { class: 'gdot', r: 3, cx: from.cx, cy: from.cy, opacity: 0 });
+        dotLayer.appendChild(circle);
+        dots.push({ circle, from, to, start: ((packet.timestamp_ms - earliest) / span) * (GRAPH_PERIOD - GRAPH_TRAVEL) });
+      }
+      svg.append(edgeLayer, dotLayer, nodeLayer);
+      graphModel = { nodes, dots };
+    }
+
+    function stepGraph(now) {
+      if (!graphModel) { graphFrame = null; return; }
+      const elapsed = now % GRAPH_PERIOD;
+      for (const dot of graphModel.dots) {
+        const progress = (elapsed - dot.start) / GRAPH_TRAVEL;
+        if (progress < 0 || progress > 1) { dot.circle.setAttribute('opacity', '0'); continue; }
+        dot.circle.setAttribute('cx', dot.from.cx + (dot.to.cx - dot.from.cx) * progress);
+        dot.circle.setAttribute('cy', dot.from.cy + (dot.to.cy - dot.from.cy) * progress);
+        dot.circle.setAttribute('opacity', Math.min(1, Math.min(progress, 1 - progress) * 7).toFixed(2));
+      }
+      graphFrame = requestAnimationFrame(stepGraph);
+    }
+    function startGraphAnimation() { if (!graphFrame && graphModel) graphFrame = requestAnimationFrame(stepGraph); }
+    function stopGraphAnimation() { if (graphFrame) cancelAnimationFrame(graphFrame); graphFrame = null; }
+
+    function renderGraph(step) {
+      if (!latestResult) return;
+      const signature = `${numberValue('signerCount')}|${numberValue('guardianCount')}|${latestResult.request_id_hex}|${latestResult.observer.packets.length}`;
+      if (signature !== graphSignature) { graphSignature = signature; buildGraph(); startGraphAnimation(); }
+      if (!graphModel) return;
+      const state = [...latestResult.events.slice(0, eventCursor + 1)].reverse().find(item => item.state)?.state || 'Created';
+      for (const node of graphModel.nodes) {
+        let sub = '', flag = '';
+        if (node.kind === 'guardian') { sub = guardianStatus(node.index, step); flag = sub === 'Offline' ? 'offline' : sub === 'Rejected' ? 'bad' : node.index <= latestResult.guardian_threshold ? 'required' : ''; }
+        else if (node.kind === 'signer') { sub = signerStatus(node.index, step); flag = sub === 'Offline' ? 'offline' : 'required'; }
+        else if (node.kind === 'mix') sub = `${String(latestResult.mode).toUpperCase()} hop`;
+        else if (node.kind === 'recovery') { sub = state; flag = latestResult.cancelled && step >= 3 ? 'bad' : step >= 4 ? 'required' : ''; }
+        else if (node.kind === 'owner') sub = 'Encrypted locally';
+        else sub = 'Pseudonymous capsule';
+        node.subText.textContent = sub;
+        node.group.setAttribute('class', `gnode ${node.kind}${flag ? ` ${flag}` : ''}`);
+      }
+      const observer = latestResult.observer;
+      byId('graphCaption').textContent = `${observer.total_observed_packets} observed · ${observer.cover_packets} cover · ${graphModel.dots.length} animated · ${String(latestResult.mode).toUpperCase()}`;
+    }
 
     async function compareModes() { if (validateOptions().length) return; const button = byId('compareButton'); button.disabled = true; button.textContent = 'Comparing…'; try { const results = await Promise.all(['off', 'basic', 'strong'].map(mode => requestDemo({ ...collectOptions(mode), cancel_before_release: false }))); const grid = byId('comparisonGrid'); grid.replaceChildren(); for (const result of results) { const card = document.createElement('div'); card.className = 'compare-mode'; const mode = document.createElement('b'); mode.textContent = result.mode.toUpperCase(); const total = document.createElement('strong'); total.textContent = `${result.observer.total_observed_packets} packets`; const detail = document.createElement('p'); detail.textContent = `${result.observer.cover_packets} cover · fixed format: ${result.observer.fixed_outer_format ? 'yes' : 'no'}`; card.append(mode, total, detail); grid.appendChild(card); } latestResult = results.find(result => result.mode === 'strong') || results[2]; eventCursor = latestResult.events.length - 1; byId('navRecovery').disabled = false; byId('comparisonPanel').classList.add('show'); showView('resultSection'); renderResult(); byId('comparisonPanel').closest('details').open = true; } catch (error) { showError(error.message); } finally { button.disabled = false; button.textContent = 'Compare OFF / BASIC / STRONG'; } }
     function applyPreset(name) { document.querySelectorAll('.scenario').forEach(button => button.classList.toggle('selected', button.dataset.preset === name)); byId('signerCount').value = 3; byId('signerThreshold').value = 2; byId('cancelThreshold').value = 2; byId('guardianCount').value = 8; byId('guardianThreshold').value = 5; byId('recoveryOutcome').value = name === 'cancel' ? 'cancel' : 'release'; syncActorControls({ offlineSigner: name === 'cancel' ? 1 : 3, offlineGuardian: name === 'failure' ? 2 : 0, corruptGuardian: name === 'failure' ? 1 : 0 }); byId('validationError').classList.remove('show'); }
