@@ -178,9 +178,9 @@ impl DemoOptions {
                 "network percentages must be between 0 and 100".into(),
             ));
         }
-        if self.simulated_delay_secs > 300 {
+        if self.simulated_delay_secs > 3 * 86_400 {
             return Err(SimError::InvalidOptions(
-                "compressed delay must be 300 seconds or less".into(),
+                "recovery delay must be three days or less".into(),
             ));
         }
         if self.cover_rate > 100 {
