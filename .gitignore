@@ -1,5 +1,7 @@
 /target/
 /.demo-state/
 *.log
+__pycache__/
+*.pyc
 /demo-data/*
 !/demo-data/.gitkeep
