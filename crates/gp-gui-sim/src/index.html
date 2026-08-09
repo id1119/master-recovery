@@ -128,8 +128,7 @@
     .mode-control button.selected { color: var(--text); background: #fff; box-shadow: 0 1px 3px #00000012; }
     .settings-note { margin: 10px 0 0; color: var(--muted); font-size: 10px; }
 
-    .actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 20px; }
-    .actions-note { max-width: 350px; margin: 0; color: var(--muted); font-size: 10px; }
+    .actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 20px; }
     .primary, .secondary { padding: 10px 15px; border-radius: 9px; cursor: pointer; font-weight: 700; font-size: 12px; }
     .primary { min-width: 170px; color: #fff; background: var(--accent); border: 1px solid var(--accent); }
     .primary:hover { background: var(--accent-dark); }
@@ -226,8 +225,6 @@
     .info-row b, .log-row b { font-size: 9px; }
     .info-row span, .log-row span { color: var(--muted); }
 
-    .footer { margin-top: 28px; color: var(--muted); text-align: center; font-size: 9px; }
-
     @media (max-width: 640px) {
       .appbar-inner { width: calc(100% - 20px); }
       .local { display: none; }
@@ -314,7 +311,7 @@
             </div>
           </details>
 
-          <div class="actions"><p class="actions-note">Encryption, sharing, integrity proofs, and the recovery test run locally with the selected deterministic seed.</p><button class="primary" id="runButton">Create backup</button></div>
+          <div class="actions"><button class="primary" id="runButton">Create backup</button></div>
           <div class="error" id="validationError" role="alert"></div>
         </div>
       </div>
@@ -362,7 +359,6 @@
       <details class="card technical"><summary>Complete event log <span>deterministic</span></summary><div class="technical-body"><div class="log" id="eventLog"></div></div></details>
     </section>
 
-    <p class="footer">Local hackathon prototype. Ed25519 is classical; X-Wing transport is post-quantum-skewed. Metadata routing is simulated and is not a production anonymity network.</p>
   </main>
 
   <script>
