@@ -184,6 +184,35 @@ impl DemoOptions {
     }
 }
 
+pub fn simulator_signer_public_keys(
+    simulation_seed: u64,
+    signer_count: u16,
+    config_version: u64,
+) -> Result<Vec<String>, SimError> {
+    if signer_count == 0 || signer_count > 20 {
+        return Err(SimError::InvalidOptions(
+            "signer count must be between 1 and 20 in the simulator".into(),
+        ));
+    }
+    Ok((1..=signer_count)
+        .map(|index| {
+            hex::encode(verifying_key_bytes(&signing_key(simulator_signer_seed(
+                simulation_seed,
+                config_version,
+                index,
+            ))))
+        })
+        .collect())
+}
+
+fn simulator_signer_seed(simulation_seed: u64, config_version: u64, signer_index: u16) -> Id32 {
+    let mut material = b"guardian-protocol/simulator/signer-ed25519/v1".to_vec();
+    material.extend_from_slice(&simulation_seed.to_be_bytes());
+    material.extend_from_slice(&config_version.to_be_bytes());
+    material.extend_from_slice(&signer_index.to_be_bytes());
+    sha256(&material)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SimEvent {
     pub at: u64,
@@ -243,7 +272,13 @@ pub fn run_demo(options: &DemoOptions) -> Result<DemoResult, SimError> {
         "Generated independent authorization key A and payload DEK.",
         Some(RecoveryState::Created),
     );
-    let mut world = setup_world(options.secret.as_bytes(), &policy, &mut rng, None)?;
+    let mut world = setup_world(
+        options.secret.as_bytes(),
+        &policy,
+        &mut rng,
+        options.seed,
+        None,
+    )?;
     log(
         &mut events,
         at,
@@ -574,6 +609,7 @@ pub fn run_demo(options: &DemoOptions) -> Result<DemoResult, SimError> {
         &plaintext,
         &policy,
         &mut rng,
+        options.seed,
         Some((capsule.config_id, capsule.config_version + 1)),
     )?;
     let rotated_version = rotated.config_store.get(&capsule.config_id)?.config_version;
@@ -605,6 +641,7 @@ fn setup_world(
     secret: &[u8],
     policy: &SetupPolicy,
     rng: &mut ChaCha20Rng,
+    simulation_seed: u64,
     rotation: Option<(Id32, u64)>,
 ) -> Result<DemoWorld, SimError> {
     let (config_id, config_version) = rotation.unwrap_or_else(|| (random_id(rng), 1));
@@ -626,7 +663,7 @@ fn setup_world(
     let mut signers = Vec::new();
     let mut signer_leaves = Vec::new();
     for index in 1..=policy.signer_count {
-        let seed = random_id(rng);
+        let seed = simulator_signer_seed(simulation_seed, config_version, index);
         let key = signing_key(seed);
         let public = verifying_key_bytes(&key);
         signer_leaves.push(sha256(&gp_wire::signer_leaf(index, &public)?));
@@ -1362,7 +1399,14 @@ mod tests {
             minimum_recovery_delay: PRODUCTION_MIN_DELAY_SECS,
         };
         let mut rng = ChaCha20Rng::seed_from_u64(options.seed);
-        let world = setup_world(options.secret.as_bytes(), &policy, &mut rng, None).unwrap();
+        let world = setup_world(
+            options.secret.as_bytes(),
+            &policy,
+            &mut rng,
+            options.seed,
+            None,
+        )
+        .unwrap();
         let capsule = world
             .config_store
             .get(&world.card.config_id)
@@ -1381,6 +1425,24 @@ mod tests {
             expiry: 10 + capsule.max_request_lifetime,
         };
         (world, capsule, recipient, request)
+    }
+
+    #[test]
+    fn signer_key_preview_matches_keys_used_by_the_protocol() {
+        let options = DemoOptions::default();
+        let (world, capsule, _, _) = fixture();
+        let preview = simulator_signer_public_keys(
+            options.seed,
+            options.signer_count,
+            capsule.config_version,
+        )
+        .unwrap();
+        let actual = world
+            .signers
+            .iter()
+            .map(|signer| hex::encode(signer.signing_public_key))
+            .collect::<Vec<_>>();
+        assert_eq!(preview, actual);
     }
 
     #[test]

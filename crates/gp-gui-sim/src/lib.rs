@@ -14,11 +14,13 @@ use axum::{
 };
 use gp_ipc::{Command, IPC_VERSION, Response, execute};
 use gp_sim::DemoOptions;
+use serde::{Deserialize, Serialize};
 
 pub async fn serve(port: u16) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(index))
         .route("/api/demo", post(run_demo_post))
+        .route("/api/signer-keys", post(signer_keys_post))
         .route("/api/health", get(health))
         .layer(DefaultBodyLimit::max(1280 * 1024));
     let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
@@ -46,6 +48,41 @@ async fn run_demo_post(
         StatusCode::OK
     };
     (status, security_headers(), Json(response))
+}
+
+#[derive(Deserialize)]
+struct SignerKeysRequest {
+    seed: u64,
+    signer_count: u16,
+}
+
+#[derive(Serialize)]
+struct SignerKeysResponse {
+    signer_public_keys: Vec<String>,
+    error: Option<String>,
+}
+
+async fn signer_keys_post(
+    Json(request): Json<SignerKeysRequest>,
+) -> (StatusCode, HeaderMap, Json<SignerKeysResponse>) {
+    match gp_sim::simulator_signer_public_keys(request.seed, request.signer_count, 1) {
+        Ok(signer_public_keys) => (
+            StatusCode::OK,
+            security_headers(),
+            Json(SignerKeysResponse {
+                signer_public_keys,
+                error: None,
+            }),
+        ),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            security_headers(),
+            Json(SignerKeysResponse {
+                signer_public_keys: vec![],
+                error: Some(error.to_string()),
+            }),
+        ),
+    }
 }
 
 fn execute_demo(options: DemoOptions) -> Response {
@@ -90,20 +127,13 @@ mod tests {
             "guidedSteps",
             "signerCount",
             "signerThreshold",
+            "signerKeys",
+            "signerKeyStatus",
             "guardianCount",
             "guardianThreshold",
-            "offlineSigner",
-            "offlineGuardian",
-            "corruptGuardian",
             "recoveryOutcome",
             "delaySeconds",
-            "replaySeed",
             "metadataMode",
-            "latencyMs",
-            "packetLoss",
-            "packetDuplication",
-            "mixDrop",
-            "coverRate",
             "fileInput",
             "compareButton",
             "copyCardButton",
@@ -127,6 +157,23 @@ mod tests {
         assert!(INDEX_HTML.contains("not a production anonymity network"));
         assert!(INDEX_HTML.contains("Ed25519 is classical/non-PQ"));
         assert!(!INDEX_HTML.contains("cancelThreshold"));
+        for removed in [
+            "Recommended recovery plan",
+            "offlineSigner",
+            "offlineGuardian",
+            "corruptGuardian",
+            "replaySeed",
+            "latencyMs",
+            "packetLoss",
+            "packetDuplication",
+            "mixDrop",
+            "coverRate",
+        ] {
+            assert!(
+                !INDEX_HTML.contains(removed),
+                "obsolete UI element {removed}"
+            );
+        }
     }
 
     #[test]
