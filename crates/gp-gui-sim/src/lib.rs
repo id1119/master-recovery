@@ -90,7 +90,6 @@ mod tests {
             "guidedSteps",
             "signerCount",
             "signerThreshold",
-            "cancelThreshold",
             "guardianCount",
             "guardianThreshold",
             "offlineSigner",

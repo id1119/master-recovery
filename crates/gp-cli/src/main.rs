@@ -14,7 +14,7 @@ struct Cli {
 enum Command {
     /// Run the complete setup, delayed recovery, and replacement demo.
     Demo(DemoArgs),
-    /// Run the threshold-valid cancellation race.
+    /// Run the setup-time owner-key hard-cancellation race.
     Cancel(DemoArgs),
     /// Replay one seed in OFF, BASIC, and STRONG metadata modes.
     Compare(DemoArgs),
@@ -43,8 +43,6 @@ struct DemoArgs {
     signer_count: u16,
     #[arg(long, default_value_t = 2)]
     signer_threshold: u16,
-    #[arg(long, default_value_t = 2)]
-    cancellation_threshold: u16,
     #[arg(long, default_value_t = 8)]
     guardian_count: u16,
     #[arg(long, default_value_t = 5)]
@@ -128,7 +126,6 @@ fn run(args: &DemoArgs, cancel: bool) -> Result<DemoResult> {
         simulated_delay_secs: args.delay_seconds,
         signer_count: args.signer_count,
         signer_threshold: args.signer_threshold,
-        cancellation_threshold: args.cancellation_threshold,
         guardian_count: args.guardian_count,
         guardian_threshold: args.guardian_threshold,
         network_latency_ms: args.latency_ms,

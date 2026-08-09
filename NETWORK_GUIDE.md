@@ -21,10 +21,11 @@ The following are real in this runtime:
 - the setup and recovery clients communicate with nodes using TCP and HTTP;
 - mailbox request and response bodies are end-to-end encrypted with X-Wing and
   XChaCha20-Poly1305;
-- every signer performs real Shamir-share encryption, Ed25519 signing, replay
-  tracking, and persistent state updates;
+- every signer performs real Shamir-share encryption, Ed25519 approval/release
+  signing, replay tracking, and persistent state updates;
 - every guardian independently validates certificates, records Begin state,
-  uses its local monotonic clock, persists cancellation tombstones, and decides
+  uses its local monotonic clock, verifies the pinned owner hard-cancel key,
+  persists cancellation tombstones, and decides
   whether it may release;
 - the recovery client reconstructs A, opens the private Recovery Descriptor,
   validates guardian material, reconstructs DEK and ciphertext, and decrypts
@@ -63,10 +64,20 @@ The `gp-network setup` command is an ephemeral client. It:
 4. seals each node's provisioning record to that node;
 5. registers random mailbox routes at the relay;
 6. publishes the non-secret Config Capsule;
-7. writes the privacy-sensitive Recovery Card.
+7. writes the privacy-sensitive Recovery Card;
+8. writes a separate mode-0600 owner-control file containing the per-config
+   cancellation private key and private guardian routes.
 
 The setup client exits after distribution. A and DEK are held in zeroizing
 buffers while setup is running and are not written to the Recovery Card.
+The owner cancellation private key is never written to the Recovery Card or
+sent to any node.
+
+This owner-cancel design is protocol v2. Persistent node-state filenames carry
+the protocol version, so old v1 state remains on disk but is not loaded as v2.
+After upgrading, run setup again to create a v2 Recovery Card and owner-control
+file. There is deliberately no migration that invents a cancellation private
+key for an old configuration.
 
 ### 2.2 Relay
 
@@ -119,8 +130,7 @@ opaque signer mailboxes. Per mailbox it stores:
 - an independent Ed25519 signing seed/public key;
 - signer Merkle membership proof;
 - pseudonymous policy and signer-set commitment;
-- seen request ids and nonces;
-- cancellation tombstones.
+- seen request ids and nonces.
 
 For a recovery request it:
 
@@ -146,6 +156,7 @@ opaque guardian mailboxes. Each provisioned mailbox stores:
 - one A-wrapped DEK share E_i;
 - guardian Merkle proof and local policy;
 - independent guardian Ed25519 key;
+- the per-config owner cancellation public key in its local policy;
 - accepted Begin requests;
 - seen nonces;
 - permanent cancellation tombstones.
@@ -171,6 +182,18 @@ inside that process.
 
 It tolerates unavailable signers/guardians and rejects corrupt guardian
 contributions until it has the configured number of valid responses.
+
+`gp-network cancel` is a separate owner-side process. It reads the private
+owner-control file and an exact observed RecoveryRequest, signs an owner-only
+hard cancel, and requires `n - k + 1` distinct, signed guardian
+acknowledgements. Each acknowledgement is encrypted to a fresh cancellation
+response key and binds the exact cancel transcript. With the default eight
+guardians and recovery threshold five, four valid acknowledgements are enough
+to leave fewer than five uncancelled guardians.
+
+A guardian persists both cancellation and successful-release state. It refuses
+to sign a cancellation acknowledgement after it has released material for that
+request. The hard cancel is intentionally not retroactive.
 
 ## 3. Docker topology
 
@@ -230,6 +253,7 @@ Files written under `demo-data/`:
 
 ```text
 recovery-card.json
+owner-control.json
 recovered-secret.bin
 ```
 
@@ -252,8 +276,8 @@ The cancellation command:
 2. collects signer approvals;
 3. sends Begin to guardians;
 4. obtains a threshold-valid release certificate to model a hostile race;
-5. obtains a threshold-valid cancellation certificate;
-6. stores cancellation tombstones on guardians;
+5. signs the exact request with the setup-time owner cancellation private key;
+6. stores owner-authorized cancellation tombstones on guardians;
 7. waits until the real demo delay elapses;
 8. presents the previously obtained release certificate;
 9. requires an honest guardian to refuse it.
@@ -314,6 +338,26 @@ target/release/gp-network serve \
 
 Without `GP_ALLOW_INSECURE_DEMO_DELAY=true`, a guardian refuses provisioning
 whose minimum delay is below 86,400 seconds.
+
+The setup command writes two different bootstrap artifacts:
+
+```text
+recovery-card.json   public to read, privacy-sensitive, no private key
+owner-control.json   mode 0600, contains the cancellation private key
+```
+
+To cancel an observed request from a separate owner process:
+
+```sh
+target/release/gp-network cancel \
+  --request ./pending-recovery.json \
+  --owner-control ./owner-control.json
+```
+
+The recovery process can export its exact public request transcript for a demo
+or monitoring bridge with `--request-out ./pending-recovery.json`. A production
+deployment still needs an authenticated owner-notification channel; the
+recovery attacker cannot be expected to publish its own request voluntarily.
 
 For VMs, expose signer and guardian node-info/provision endpoints only to the
 setup administration network. Relay mailbox forwarding must still be able to
@@ -442,6 +486,7 @@ Owner          Signers/Guardians        Relay             Config Store
   |<-- role + KEM pk --|                   |                    |
   |                    |                   |                    |
   | locally generate A, DEK, shares, encrypted payload, fragments
+  | locally generate per-config owner cancellation signing key
   |                    |                   |                    |
   |-- sealed provision>|                   |                    |
   |<-- stored ack ------|                   |                    |
@@ -452,7 +497,7 @@ Owner          Signers/Guardians        Relay             Config Store
   |-- PUT public Config Capsule -------------------------------->|
   |<-- stored ---------------------------------------------------|
   |                    |                   |                    |
-  | write Recovery Card locally            |                    |
+  | write Recovery Card and private owner-control file locally  |
 ```
 
 ### 7.1 Signer provisioning contents
@@ -464,7 +509,7 @@ A share
 independent Ed25519 seed/public key
 Merkle membership proof
 config/version and signer policy
-empty replay/cancellation state
+empty replay state
 ```
 
 ### 7.2 Guardian provisioning contents
@@ -477,6 +522,7 @@ A-wrapped DEK share E_i
 guardian Merkle proof
 independent Ed25519 seed
 minimal pseudonymous guardian policy
+per-config owner cancellation public key
 ```
 
 `GuardianPolicy.signer_count` is pinned in addition to the signer threshold and
@@ -537,11 +583,15 @@ Contains the exact RecoveryRequest and threshold-valid SignerContributions.
 Each guardian independently verifies all signer proofs and signatures. It then
 persists request id, digest, nonce, boot id and monotonic `not_before`.
 
-### CancelCertificate
+### OwnerCancelCertificate
 
-Contains threshold-valid signer cancellation votes for the request digest. A
-guardian stores a permanent request-id/digest tombstone even if cancellation
-arrives before Begin. A conflicting digest fails closed.
+Contains one Ed25519 owner signature under the per-config public key pinned
+during setup. The signed transcript binds config id/version, request id/digest,
+the hostile recovery recipient, nonce, reason, issue time, and a fresh response
+recipient used only for encrypted guardian acknowledgements. Signers cannot
+produce this certificate. A guardian stores a permanent request-id/digest
+tombstone even if cancellation arrives before Begin. A conflicting digest
+fails closed.
 
 ### ReleaseCertificate
 
@@ -590,8 +640,7 @@ Persisted signer safety state:
 
 - seen request ids;
 - seen nonces;
-- request digests;
-- cancellation tombstones.
+- request digests.
 
 Persisted guardian safety state:
 

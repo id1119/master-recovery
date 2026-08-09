@@ -1,20 +1,27 @@
-use std::{fs, path::Path, time::Duration};
+use std::{
+    collections::BTreeSet,
+    fs::{self, OpenOptions},
+    io::Write,
+    path::Path,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
-use gp_crypto::{RecipientKeyPair, seal_to_recipient};
+use gp_crypto::{RecipientKeyPair, seal_to_recipient, zeroize_id};
 use gp_types::{
-    BeginRecoveryCertificate, CancelCertificate, ConfigCapsule, RecoveryCard, RecoveryRequest,
-    ReleaseCertificate, SetupPolicy,
+    BeginRecoveryCertificate, ConfigCapsule, RecoveryCard, RecoveryRequest, ReleaseCertificate,
+    SetupPolicy,
 };
 
 use crate::{
     protocol::{
-        create_setup, open_descriptor, random_id, random_nonce, reconstruct_a, reconstruct_payload,
-        validate_capsule, validate_guardian_contribution, wall_now,
+        create_setup, make_owner_cancel_certificate, open_descriptor, random_id, random_nonce,
+        reconstruct_a, reconstruct_payload, validate_capsule, validate_guardian_contribution,
+        validate_owner_cancel_ack, wall_now,
     },
     types::{
-        MailboxRequest, MailboxResponse, NetworkDemoResult, NodeInfo, ProvisionPayload,
-        RouteRegistration, SealedMailboxBody,
+        MailboxRequest, MailboxResponse, NetworkDemoResult, NodeInfo, OwnerCancelResult,
+        OwnerControlFile, ProvisionPayload, RouteRegistration, SealedMailboxBody,
     },
 };
 
@@ -27,16 +34,23 @@ pub struct SetupOptions {
     pub signers: Vec<String>,
     pub guardians: Vec<String>,
     pub signer_threshold: u16,
-    pub cancellation_threshold: u16,
     pub guardian_threshold: u16,
     pub delay_secs: u64,
     pub card_path: String,
+    pub owner_control_path: String,
 }
 
 pub struct RecoverOptions {
     pub card_path: String,
     pub output_path: Option<String>,
+    pub request_out_path: Option<String>,
     pub cancel_before_release: bool,
+    pub owner_control_path: String,
+}
+
+pub struct CancelOptions {
+    pub request_path: String,
+    pub owner_control_path: String,
 }
 
 pub async fn setup(options: SetupOptions) -> Result<RecoveryCard> {
@@ -55,7 +69,6 @@ pub async fn setup(options: SetupOptions) -> Result<RecoveryCard> {
     let policy = SetupPolicy {
         signer_count,
         signer_threshold: options.signer_threshold,
-        cancellation_threshold: options.cancellation_threshold,
         guardian_count,
         guardian_threshold: options.guardian_threshold,
         minimum_recovery_delay: options.delay_secs,
@@ -67,6 +80,20 @@ pub async fn setup(options: SetupOptions) -> Result<RecoveryCard> {
         guardian_mailboxes,
         &options.config_store,
     )?;
+    let mut owner_control = OwnerControlFile {
+        protocol_version: bundle.capsule.protocol_version,
+        config_id: bundle.capsule.config_id,
+        config_version: bundle.capsule.config_version,
+        owner_cancel_signing_seed: bundle
+            .owner_cancel_signing_seed
+            .as_slice()
+            .try_into()
+            .context("invalid owner cancellation signing seed")?,
+        owner_cancel_public_key: bundle.capsule.owner_cancel_public_key,
+        guardian_count: bundle.capsule.guardian_count,
+        guardian_threshold: bundle.capsule.guardian_threshold,
+        guardian_routes: bundle.owner_guardian_routes.clone(),
+    };
 
     println!("SETUP config={}", hex::encode(bundle.capsule.config_id));
     for ((target, signer), mailbox) in options
@@ -126,7 +153,12 @@ pub async fn setup(options: SetupOptions) -> Result<RecoveryCard> {
         .await?;
     ensure_success(response, "publish Config Capsule").await?;
     write_private_json(Path::new(&options.card_path), &bundle.card)?;
-    println!("  published Config Capsule and wrote {}", options.card_path);
+    write_private_json(Path::new(&options.owner_control_path), &owner_control)?;
+    zeroize_id(&mut owner_control.owner_cancel_signing_seed);
+    println!(
+        "  published Config Capsule and wrote {} plus private owner control {}",
+        options.card_path, options.owner_control_path
+    );
     Ok(bundle.card)
 }
 
@@ -221,6 +253,10 @@ pub async fn recover(options: RecoverOptions) -> Result<NetworkDemoResult> {
         nonce: random_id(),
         expiry: now.saturating_add(capsule.max_request_lifetime),
     };
+    if let Some(path) = &options.request_out_path {
+        write_private_json(Path::new(path), &request)?;
+        println!("  wrote public recovery transcript to {path} for owner monitoring");
+    }
     println!("RECOVERY request={}", hex::encode(request.request_id));
 
     let mut signer_contributions = Vec::new();
@@ -288,8 +324,8 @@ pub async fn recover(options: RecoverOptions) -> Result<NetworkDemoResult> {
     }
 
     if options.cancel_before_release {
-        // Capture a threshold-valid release certificate before cancellation to model a hostile
-        // client racing a previously obtained certificate against the cancellation tombstone.
+        // Capture a threshold-valid release certificate before the owner's hard cancel to model
+        // a hostile recovery client racing an older certificate against the owner tombstone.
         let mut pre_cancel_release_votes = Vec::new();
         for mailbox in &card.signer_mailboxes {
             if let Ok(MailboxResponse::ReleaseVote(vote)) = send_mailbox(
@@ -314,53 +350,56 @@ pub async fn recover(options: RecoverOptions) -> Result<NetworkDemoResult> {
         let raced_release = ReleaseCertificate {
             votes: pre_cancel_release_votes,
         };
-        let mut votes = Vec::new();
-        for mailbox in &card.signer_mailboxes {
-            match send_mailbox(
+        let mut owner_control: OwnerControlFile =
+            serde_json::from_slice(&fs::read(&options.owner_control_path)?)?;
+        if owner_control.protocol_version != gp_types::PROTOCOL_VERSION
+            || owner_control.config_id != request.config_id
+            || owner_control.config_version != request.config_version
+            || owner_control.owner_cancel_public_key != capsule.owner_cancel_public_key
+            || owner_control.guardian_count != capsule.guardian_count
+            || owner_control.guardian_threshold != capsule.guardian_threshold
+            || owner_control.guardian_routes != descriptor.guardians
+        {
+            bail!("owner control file does not match this recovery configuration");
+        }
+        let cancel_recipient = RecipientKeyPair::from_seed(random_id());
+        let certificate_result = make_owner_cancel_certificate(
+            &request,
+            owner_control.owner_cancel_signing_seed,
+            cancel_recipient.public_key().to_vec(),
+            1,
+            wall_now()?,
+        );
+        zeroize_id(&mut owner_control.owner_cancel_signing_seed);
+        let certificate = certificate_result?;
+        let mut cancelled_guardians = BTreeSet::new();
+        for route in &descriptor.guardians {
+            if let Ok(MailboxResponse::CancellationAccepted(ack)) = send_mailbox(
                 &client,
-                mailbox,
-                &MailboxRequest::SignerCancel {
+                &route.mailbox,
+                &MailboxRequest::GuardianCancel {
                     request: request.clone(),
-                    reason_code: 1,
+                    certificate: Box::new(certificate.clone()),
                 },
-                &recipient,
+                &cancel_recipient,
             )
             .await
+                && validate_owner_cancel_ack(&ack, &certificate, &request, route).is_ok()
             {
-                Ok(MailboxResponse::CancelVote(vote)) => votes.push(vote),
-                Ok(_) => {}
-                Err(error) => println!("  cancel signer unavailable: {error}"),
-            }
-            if votes.len() >= usize::from(capsule.cancellation_threshold) {
-                break;
+                cancelled_guardians.insert(ack.guardian_index);
             }
         }
-        if votes.len() < usize::from(capsule.cancellation_threshold) {
-            bail!("cancellation threshold was not reached");
-        }
-        let certificate = CancelCertificate { votes };
-        let mut cancelled_guardians = 0;
-        for route in &descriptor.guardians {
-            if matches!(
-                send_mailbox(
-                    &client,
-                    &route.mailbox,
-                    &MailboxRequest::GuardianCancel {
-                        request: request.clone(),
-                        certificate: certificate.clone(),
-                    },
-                    &recipient,
-                )
-                .await,
-                Ok(MailboxResponse::CancellationAccepted)
-            ) {
-                cancelled_guardians += 1;
-            }
-        }
-        if cancelled_guardians < usize::from(capsule.guardian_threshold) {
+        let required_acks = required_cancel_acks(
+            usize::from(capsule.guardian_count),
+            usize::from(capsule.guardian_threshold),
+        )?;
+        if cancelled_guardians.len() < required_acks {
             bail!("cancellation did not reach enough guardians");
         }
-        println!("  cancellation tombstone stored by {cancelled_guardians} guardians");
+        println!(
+            "  owner hard-cancel tombstone stored by {} guardians",
+            cancelled_guardians.len()
+        );
         tokio::time::sleep(Duration::from_secs(
             capsule.minimum_recovery_delay.saturating_add(1),
         ))
@@ -509,6 +548,84 @@ pub async fn recover(options: RecoverOptions) -> Result<NetworkDemoResult> {
     })
 }
 
+pub async fn cancel(options: CancelOptions) -> Result<OwnerCancelResult> {
+    let client = reqwest::Client::new();
+    let request: RecoveryRequest = serde_json::from_slice(&fs::read(&options.request_path)?)?;
+    let mut owner_control: OwnerControlFile =
+        serde_json::from_slice(&fs::read(&options.owner_control_path)?)?;
+    let now = wall_now()?;
+    if owner_control.protocol_version != gp_types::PROTOCOL_VERSION
+        || request.protocol_version != gp_types::PROTOCOL_VERSION
+        || owner_control.config_id != request.config_id
+        || owner_control.config_version != request.config_version
+        || request.requested_at > now
+        || request.expiry <= now
+        || usize::from(owner_control.guardian_count) != owner_control.guardian_routes.len()
+        || owner_control.guardian_threshold == 0
+        || owner_control.guardian_threshold > owner_control.guardian_count
+    {
+        zeroize_id(&mut owner_control.owner_cancel_signing_seed);
+        bail!("owner control file and recovery request do not form a valid active configuration");
+    }
+    let expected_public = gp_crypto::verifying_key_bytes(&gp_crypto::signing_key(
+        owner_control.owner_cancel_signing_seed,
+    ));
+    if expected_public != owner_control.owner_cancel_public_key {
+        zeroize_id(&mut owner_control.owner_cancel_signing_seed);
+        bail!("owner control private key does not match its pinned public key");
+    }
+    let cancel_recipient = RecipientKeyPair::from_seed(random_id());
+    let certificate_result = make_owner_cancel_certificate(
+        &request,
+        owner_control.owner_cancel_signing_seed,
+        cancel_recipient.public_key().to_vec(),
+        1,
+        now,
+    );
+    zeroize_id(&mut owner_control.owner_cancel_signing_seed);
+    let certificate = certificate_result?;
+    let mut acknowledgements = BTreeSet::new();
+    for route in &owner_control.guardian_routes {
+        if let Ok(MailboxResponse::CancellationAccepted(ack)) = send_mailbox(
+            &client,
+            &route.mailbox,
+            &MailboxRequest::GuardianCancel {
+                request: request.clone(),
+                certificate: Box::new(certificate.clone()),
+            },
+            &cancel_recipient,
+        )
+        .await
+            && validate_owner_cancel_ack(&ack, &certificate, &request, route).is_ok()
+        {
+            acknowledgements.insert(ack.guardian_index);
+        }
+    }
+    let required_acks = required_cancel_acks(
+        usize::from(owner_control.guardian_count),
+        usize::from(owner_control.guardian_threshold),
+    )?;
+    if acknowledgements.len() < required_acks {
+        bail!(
+            "owner hard-cancel reached {} guardians, fewer than the required {required_acks}",
+            acknowledgements.len()
+        );
+    }
+    Ok(OwnerCancelResult {
+        config_id: hex::encode(request.config_id),
+        request_id: hex::encode(request.request_id),
+        guardian_acknowledgements: acknowledgements.len(),
+        permanently_cancelled: true,
+    })
+}
+
+fn required_cancel_acks(total_guardians: usize, recovery_threshold: usize) -> Result<usize> {
+    if recovery_threshold == 0 || recovery_threshold > total_guardians {
+        bail!("invalid guardian threshold in owner control state");
+    }
+    Ok(total_guardians - recovery_threshold + 1)
+}
+
 async fn send_mailbox(
     client: &reqwest::Client,
     mailbox: &str,
@@ -584,6 +701,38 @@ fn write_private_json(path: &Path, value: &impl serde::Serialize) -> Result<()> 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, serde_json::to_vec_pretty(value)?)?;
+    let bytes = serde_json::to_vec_pretty(value)?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::PermissionsExt;
+        options.mode(0o600);
+        let mut file = options.open(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut file = options.open(path)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::required_cancel_acks;
+
+    #[test]
+    fn hard_cancel_requires_enough_tombstones_to_break_recovery_quorum() {
+        assert_eq!(required_cancel_acks(8, 5).unwrap(), 4);
+        assert_eq!(required_cancel_acks(3, 2).unwrap(), 2);
+        assert_eq!(required_cancel_acks(8, 1).unwrap(), 8);
+        assert!(required_cancel_acks(8, 0).is_err());
+        assert!(required_cancel_acks(3, 4).is_err());
+    }
 }

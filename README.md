@@ -46,6 +46,19 @@ corrupt guardian, and reconstructs plaintext only in the recovery client. See
 [`NETWORK_GUIDE.md`](NETWORK_GUIDE.md) for the complete communication model,
 VM commands, APIs, failure demos, and security limitations.
 
+Network setup also writes `demo-data/owner-control.json` with mode `0600`.
+That private per-config artifact is the only cancellation authority. It is
+separate from the non-confidential Recovery Card and must not be published.
+
+Owner hard cancellation is protocol v2. Node state files are namespaced by
+protocol version, so existing v1 Docker volumes are left intact but ignored.
+Run `make network-demo` once to provision a fresh v2 Recovery Card and private
+owner-control file; an old card cannot be used with the v2 nodes.
+
+For a non-code explanation, presentation script, terminology guide, and twenty
+adversarial defense questions with answers, read
+[`HUMAN_GUIDE_AND_DEFENSE.md`](HUMAN_GUIDE_AND_DEFENSE.md).
+
 The browser uses a compact three-stage flow: create an encrypted backup, save
 the generated Recovery Card, then test recovery on a fresh-client view. The
 verified protocol trace can be played automatically or stepped backward and
@@ -56,7 +69,7 @@ guardian roster or a decryption key.
 The backup card accepts either text or a file up to 700 KiB. Safe defaults keep
 the first screen short. **Customize plan and test conditions** exposes every
 simulator control from the design: the three scenarios, signer/guardian counts
-and thresholds, cancellation threshold, offline/corrupt actors, delay,
+and thresholds, owner hard cancellation, offline/corrupt actors, delay,
 metadata mode, latency, loss, duplication, mix drops, cover traffic, replay
 seed, and same-seed mode comparison. Impossible combinations are rejected with
 a specific explanation before protocol execution. File plaintext is shown or
@@ -71,7 +84,7 @@ cargo run -p gp-cli -- demo --seed 424242 --mode strong
 # One corrupted and one offline guardian; replacement still succeeds
 cargo run -p gp-cli -- demo --corrupt-guardian 1 --offline-guardian 2
 
-# Threshold cancellation immediately before release
+# Setup-time owner-key hard cancellation immediately before release
 cargo run -p gp-cli -- cancel --seed 424242
 
 # Compare observer views using the same protocol seed
@@ -96,11 +109,11 @@ Use `0` for a guardian/signer option to disable that adversarial toggle.
 - Exact config version, request id, recipient, nonce, actor index, and request
   digest binding.
 - Deterministic recovery and guardian state machines.
-- Threshold-valid cancellation that permanently kills an observed request.
+- Owner-only hard cancellation using a per-config private key created at setup.
 - Signer-side request-id/nonce replay protection and guardian cancellation
   tombstones that survive Begin/cancel message reordering.
-- Independently verifiable signer Merkle membership in begin, cancellation,
-  and release certificates.
+- Independently verifiable signer Merkle membership in Begin and Release, plus
+  owner cancellation signatures checked against each guardian's pinned key.
 - Malicious/offline guardian replacement and final client-only reconstruction.
 - Successful-recovery rotation to fresh version-2 keys, shares, fragments,
   commitments, and opaque slots.
@@ -151,7 +164,8 @@ guardian roster. The roster exists only in the Recovery Descriptor sealed under
 `A`.
 
 A compromised signer threshold can authorize a malicious recovery. The delay
-and cancellation path provide a reaction window; they do not make that
+and owner hard-cancel path provide a reaction window while the original owner
+retains its per-config cancellation key; they do not make that
 compromise harmless. Guardians enforce the delay as policy using an injected
 monotonic clock—it is not a trust-free cryptographic timelock.
 

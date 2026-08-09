@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const PRODUCTION_MIN_DELAY_SECS: u64 = 24 * 60 * 60;
 
 pub type Id32 = [u8; 32];
@@ -68,23 +68,31 @@ pub struct BeginRecoveryCertificate {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CancelVote {
+pub struct OwnerCancelCertificate {
     pub protocol_version: u16,
     pub config_id: Id32,
     pub config_version: u64,
     pub request_id: Id32,
     pub request_digest: Id32,
+    pub recovery_recipient_key: Vec<u8>,
+    pub cancel_response_recipient_key: Vec<u8>,
     pub reason_code: u16,
     pub nonce: Id32,
-    pub signer_id: u16,
-    pub signer_public_key: [u8; 32],
-    pub signer_membership_proof: MerkleProofBytes,
-    pub signer_signature: SignatureBytes,
+    pub issued_at: u64,
+    pub owner_cancel_public_key: [u8; 32],
+    pub owner_signature: SignatureBytes,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CancelCertificate {
-    pub votes: Vec<CancelVote>,
+pub struct OwnerCancelAck {
+    pub protocol_version: u16,
+    pub config_id: Id32,
+    pub config_version: u64,
+    pub request_id: Id32,
+    pub request_digest: Id32,
+    pub owner_cancel_transcript_digest: Id32,
+    pub guardian_index: u16,
+    pub guardian_signature: SignatureBytes,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -158,11 +166,11 @@ pub struct ConfigCapsule {
     pub config_version: u64,
     pub signer_count: u16,
     pub signer_threshold: u16,
-    pub cancellation_threshold: u16,
     pub guardian_count: u16,
     pub guardian_threshold: u16,
     pub minimum_recovery_delay: u64,
     pub signer_set_commitment: Id32,
+    pub owner_cancel_public_key: [u8; 32],
     pub guardian_material_commitment: Id32,
     pub encrypted_recovery_descriptor: AeadCiphertext,
     pub max_request_lifetime: u64,
@@ -174,6 +182,7 @@ pub struct RecoveryCard {
     pub capsule_locator: String,
     pub signer_mailboxes: Vec<String>,
     pub signer_set_commitment: Id32,
+    pub owner_cancel_public_key: [u8; 32],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -182,7 +191,6 @@ pub struct SignerPolicy {
     pub config_version: u64,
     pub signer_set_commitment: Id32,
     pub signer_threshold: u16,
-    pub cancellation_threshold: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -192,7 +200,7 @@ pub struct GuardianPolicy {
     pub signer_set_commitment: Id32,
     pub signer_count: u16,
     pub signer_threshold: u16,
-    pub cancellation_threshold: u16,
+    pub owner_cancel_public_key: [u8; 32],
     pub minimum_recovery_delay: u64,
     pub guardian_material_root: Id32,
 }
@@ -223,7 +231,6 @@ pub struct SealedMessage {
 pub struct SetupPolicy {
     pub signer_count: u16,
     pub signer_threshold: u16,
-    pub cancellation_threshold: u16,
     pub guardian_count: u16,
     pub guardian_threshold: u16,
     pub minimum_recovery_delay: u64,
@@ -234,7 +241,6 @@ impl Default for SetupPolicy {
         Self {
             signer_count: 3,
             signer_threshold: 2,
-            cancellation_threshold: 2,
             guardian_count: 8,
             guardian_threshold: 5,
             minimum_recovery_delay: PRODUCTION_MIN_DELAY_SECS,

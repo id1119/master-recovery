@@ -58,7 +58,7 @@ Everything below exists to serve that demo.
 
 10. One guardian becomes malicious or unavailable. It corrupts a fragment or refuses to release.
 11. The recovery client detects the corrupted response through authenticated integrity checks and the Merkle commitment, discards it, and obtains replacement contributions until it has the required number of valid guardian responses.
-12. Run a cancellation race: a valid cancellation is issued before release. The recovery request becomes permanently cancelled and no honest guardian releases for that request.
+12. Run a cancellation race: the original owner uses the setup-time per-config private cancellation key before release. The recovery request becomes permanently cancelled and no honest guardian that observes it releases for that request.
 
 ### Leg 4 — Metadata
 
@@ -85,7 +85,6 @@ They are independent trusted people or devices selected by the owner. They:
 - verify a recovery request through an external/social process,
 - approve the exact recovery recipient and request transcript,
 - hold independent Shamir shares of authorization key A,
-- may participate in cancellation,
 - later participate in the release certificate.
 
 They never receive the plaintext secret.
@@ -269,7 +268,7 @@ This gives the intended separation:
 - the relay possesses neither,
 - the recovery client can reconstruct only after the signer threshold and guardian release path both succeed.
 
-Do not claim that a compromised signer threshold is harmless. A compromised signer threshold can authorize a malicious recovery; the minimum delay and cancellation mechanism exist to provide a reaction window. The exact threat model must remain explicit.
+Do not claim that a compromised signer threshold is harmless. A compromised signer threshold can authorize a malicious recovery; the minimum delay and owner hard-cancellation mechanism provide a reaction window while the owner cancellation key remains available. The exact threat model must remain explicit.
 
 ---
 
@@ -384,7 +383,7 @@ ConfigCapsule {
 
     signer_count,
     signer_threshold,
-    cancellation_threshold,
+    owner_cancel_public_key,
 
     guardian_count,
     guardian_threshold,
@@ -435,6 +434,7 @@ After a successful recovery:
 - increment config_version,
 - generate a new A,
 - generate a new DEK,
+- generate a new per-config owner cancellation keypair,
 - create new signer A shares,
 - create new DEK guardian shares,
 - create new encrypted DEK shares E_i,
@@ -456,11 +456,12 @@ config_id
 config-capsule locator
 signer opaque mailbox handles
 signer_set_commitment
+owner_cancel_public_key
 ```
 
 The Recovery Card is **non-confidential but privacy-sensitive**.
 
-It contains no A share, DEK share, guardian roster, plaintext secret, or decryption key. Stealing it should not be sufficient to recover a secret, but it can reveal pseudonymous recovery-locator metadata and can be used for spam/phishing attempts against signer mailboxes.
+It contains no A share, DEK share, guardian roster, plaintext secret, decryption key, or owner cancellation private key. Stealing it should not be sufficient to recover a secret, but it can reveal pseudonymous recovery-locator metadata and can be used for spam/phishing attempts against signer mailboxes.
 
 The protocol should therefore rate-limit recovery requests and should not call the card "meaningless if stolen".
 
@@ -554,13 +555,13 @@ A alone is not sufficient to recover the secret because the recovery client stil
 
 ---
 
-## 12. Two-Phase Recovery, 24-Hour Delay, and Cancellation
+## 12. Two-Phase Recovery, 24-Hour Delay, and Owner Hard Cancellation
 
 Do not use drand.
 
 The delay is enforced by honest guardians using a monotonic clock.
 
-The protocol uses two signer phases so guardians do not need to infer the absence of a cancellation message from an unreliable network.
+The protocol uses signer-approved Begin and Release phases. Guardians never infer permission from the absence of an owner cancellation message; they require a valid ReleaseCertificate and locally verify that no owner hard-cancel tombstone exists.
 
 ### Phase 1 — Begin Recovery
 
@@ -601,22 +602,42 @@ not_before = started_at_monotonic + configured_delay
 
 The production configuration must enforce a minimum delay of 24 hours. The simulator may compress this to seconds.
 
-### Cancellation
+### Owner Hard Cancellation
 
-During the delay, configured signers may issue signed cancellation votes for the exact request.
+Setup generates an independent per-config Ed25519 owner cancellation keypair.
+The private key remains only in the owner's private control state. It is never
+placed in the Recovery Card, Config Store, signer state, guardian state, or a
+network message. The corresponding public key is pinned in the Config Capsule,
+Recovery Card, and each guardian's local policy.
 
-Once the cancellation threshold is reached, a valid `CancelCertificate` permanently invalidates the request for every honest node that receives it.
+Only this setup-time private key can authorize cancellation. Signers cannot
+cancel a request and there is no signer cancellation threshold.
 
-Cancellation votes carry the signer's pseudonymous public key and Merkle
-membership proof. This lets a guardian validate each vote directly against its
-pinned `signer_set_commitment`, without access to a global signer registry or
-simulator-privileged state. A valid cancellation received before the
-corresponding Begin certificate is retained as a tombstone and blocks a later
-Begin for the same request id and digest.
+The owner signs an `OwnerCancelCertificate` bound to the complete exact
+RecoveryRequest, including config id/version, request id/digest, recovery
+recipient, nonce, reason, issue time, and a fresh response-recipient key used
+for encrypted guardian acknowledgements.
 
-A signer that has signed cancellation for a request must not later sign the release phase for that request.
+A valid owner hard cancel permanently invalidates the request for every honest
+guardian that receives it. A cancellation received before the corresponding
+Begin certificate is retained as a tombstone and blocks a later Begin for the
+same request id and digest. A conflicting digest fails closed.
 
-An owner identity that is still available may optionally hard-cancel under the existing project policy.
+Each guardian persists the tombstone before returning a signed
+`OwnerCancelAck` bound to the exact cancellation transcript. The owner treats
+the distributed hard cancel as complete only after verifying distinct
+acknowledgements from at least `n - k + 1` guardians, where `n` is the guardian
+count and `k` is the DEK recovery threshold. This leaves fewer than `k`
+uncancelled guardians, so an honest acknowledged set can no longer form a
+recovery quorum. With the default `n=8, k=5`, four acknowledgements are needed.
+A guardian must not acknowledge cancellation if it has already released its
+contribution for that request. Cancellation cannot retract material that was
+already delivered.
+
+The owner cancellation key has no Begin, Release, descriptor-decryption, A,
+DEK, or payload-decryption authority. Its compromise permits denial of service
+against recovery requests for that configuration, not recovery of the secret.
+If the owner loses the private key, no signer fallback can cancel requests.
 
 There is no public plaintext event log.
 
@@ -640,7 +661,7 @@ An honest guardian releases only if:
 - it previously accepted the BeginRecoveryCertificate,
 - its own monotonic `not_before` has elapsed,
 - the request has not expired,
-- it has not observed a valid cancellation certificate,
+- it has not observed a valid owner hard-cancel certificate,
 - the ReleaseCertificate is valid for the exact request,
 - the config version is still current.
 
@@ -960,25 +981,39 @@ BeginRecoveryCertificate {
 }
 ```
 
-### CancelRequest / CancelCertificate
+### OwnerCancelCertificate
 
 ```text
-CancelRequest {
+OwnerCancelCertificate {
     protocol_version,
     config_id,
     config_version,
     request_id,
     request_digest,
+    recovery_recipient_key,
+    cancel_response_recipient_key,
     reason_code,
     nonce,
-    signer_id,
-    signer_public_key,
-    signer_membership_proof,
-    signer_signature
+    issued_at,
+    owner_cancel_public_key,
+    owner_signature
 }
 ```
 
-A threshold-valid set forms the CancelCertificate.
+### OwnerCancelAck
+
+```text
+OwnerCancelAck {
+    protocol_version,
+    config_id,
+    config_version,
+    request_id,
+    request_digest,
+    owner_cancel_transcript_digest,
+    guardian_index,
+    guardian_signature
+}
+```
 
 ### ReleaseVote / ReleaseCertificate
 
@@ -1032,7 +1067,7 @@ GuardianContribution {
 ```
 
 `request_digest` is `SHA256("gp/recovery-request-digest/v1" || canonical_recovery_request)`.
-It binds cancellation votes and guardian contributions to the complete immutable request,
+It binds owner hard cancellation and guardian contributions to the complete immutable request,
 including the exact recovery recipient, nonce, expiry, and crypto suite.
 
 ### RecoveryDescriptor
@@ -1066,7 +1101,7 @@ Live controls:
 
 - signer count and threshold,
 - guardian count and threshold,
-- cancellation threshold,
+- owner hard-cancel test control,
 - recovery delay multiplier,
 - network latency,
 - packet loss,
@@ -1094,7 +1129,7 @@ fresh recovery recipient
 -> private guardian discovery
 -> begin recovery
 -> delay
--> cancel OR release certificate
+-> owner hard cancel OR release certificate
 -> guardian contributions
 -> local DEK reconstruction
 -> local payload reconstruction
@@ -1137,7 +1172,7 @@ The hackathon test budget is intentionally small but must cover the corrected de
 
 1. setup -> recovery -> success,
 2. corrupt/offline guardian -> replacement contribution -> success,
-3. begin -> cancellation before release -> no honest release,
+3. begin -> owner hard cancel before release -> no honest release,
 4. same simulation seed -> identical run.
 
 Provide one `make test` or equivalent project command that executes the complete hackathon test suite.

@@ -25,6 +25,7 @@ Generate:
 - `config_version`: initial version,
 - A,
 - DEK,
+- an independent per-config owner cancellation signing keypair,
 - signer set,
 - guardian set,
 - thresholds,
@@ -110,6 +111,8 @@ GuardianRecord_i {
 It pins the signer count as well as the signer threshold and signer-set root so
 a standalone guardian can verify Merkle membership proofs without privileged
 simulator state or a public signer registry.
+It also pins the per-config owner cancellation public key. The corresponding
+private key remains only in the owner's private control state.
 
 ### 2.9 Recovery Descriptor
 
@@ -143,6 +146,7 @@ Publish/redundantly store the pseudonymous Config Capsule containing:
 - thresholds,
 - delay,
 - signer-set commitment,
+- owner cancellation public key,
 - guardian-material commitment,
 - encrypted Recovery Descriptor,
 - replay-protection parameters.
@@ -154,7 +158,8 @@ Create a privacy-sensitive, non-confidential locator containing:
 - config id,
 - Config Capsule locator,
 - signer opaque mailbox handles,
-- signer-set commitment.
+- signer-set commitment,
+- per-config owner cancellation public key.
 
 It contains no secret key material and no guardian roster.
 
@@ -219,23 +224,37 @@ Before `not_before`, an honest guardian does not release its contribution.
 
 No drand timelock is used.
 
-### 3.8 Cancellation
+### 3.8 Owner Hard Cancellation
 
-During the delay, threshold-valid signed cancellation votes can form a CancelCertificate for the exact request.
+Only the independent per-config owner cancellation private key can cancel a
+recovery. Signers have no cancellation authority.
 
-A guardian that observes a valid cancellation marks the request permanently cancelled.
+The owner creates one `OwnerCancelCertificate` containing the config id/version,
+request id and canonical request digest, exact recovery recipient, fresh
+cancellation-response recipient, nonce, reason code, issue time, and the pinned
+owner cancellation public key. The owner signs its canonical domain-separated
+transcript.
 
-Each vote includes the signer's pseudonymous public key and Merkle membership
-proof. The guardian verifies that proof against its pinned signer-set
-commitment before counting the signature. A valid cancellation observed before
-Begin is stored as a request-specific tombstone and rejects a later reordered
-Begin.
+A guardian verifies the signature against its locally pinned owner cancellation
+public key. A valid cancellation marks the exact request permanently cancelled.
+If it arrives before Begin, the guardian stores a request-specific tombstone and
+rejects a later reordered Begin. A conflicting request digest fails closed.
 
-Each cancellation vote includes a canonical digest of the complete immutable
-RecoveryRequest, binding the vote to its exact recovery recipient, nonce,
-expiry, and crypto suite.
+After durably storing the tombstone, the guardian returns a signed
+`OwnerCancelAck` bound to the exact cancellation transcript. The owner declares
+hard cancellation complete only after verifying distinct acknowledgements from
+at least `n - k + 1` guardians. This leaves fewer than the `k` guardians needed
+to reconstruct DEK. For the default `n=8, k=5` configuration, the owner needs
+four valid guardian acknowledgements.
 
-A signer that has cancelled a request must not sign that request's release phase.
+A guardian records successful release before sending its contribution and
+refuses to acknowledge a later cancellation for that request. Hard cancel is
+not retroactive: it cannot erase material that a recovery client already
+received.
+
+The owner cancellation key can only deny recovery. It cannot authorize Begin or
+Release, open the Recovery Descriptor, reconstruct A or DEK, or decrypt payload
+material.
 
 ### 3.9 Release Certificate
 
@@ -252,7 +271,7 @@ A guardian releases only if:
 - BeginRecoveryCertificate was valid,
 - its local delay elapsed,
 - the request is not expired,
-- no valid cancellation was observed,
+- no valid owner hard cancellation was observed,
 - ReleaseCertificate is valid,
 - config version is current.
 
@@ -299,5 +318,6 @@ After successful recovery, create a new configuration version with fresh:
 - ciphertext fragments,
 - opaque slot ids,
 - request/replay state.
+- owner cancellation keypair.
 
 Old versions become invalid.

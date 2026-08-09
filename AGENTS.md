@@ -37,7 +37,8 @@ If two files disagree, follow the higher file in this list and fix the lower fil
 - Recovery from a new device requires a fresh recovery-recipient KEM keypair.
 - Signer approvals must bind to the exact recovery recipient and exact request transcript.
 - Recovery uses Begin -> Delay -> ReleaseCertificate.
-- A threshold-valid cancellation permanently kills the request for honest nodes that observe it.
+- Only the setup-time per-config owner cancellation private key can authorize cancellation.
+- A valid owner hard cancellation permanently kills the request for honest nodes that observe it.
 - Honest guardians fail closed on ambiguous state.
 - Final reconstruction happens only on the recovery client.
 - Config versions and request ids are replay-protected.
@@ -108,7 +109,7 @@ At minimum preserve tests for:
 - replay/stale-version rejection,
 - end-to-end recovery,
 - malicious/offline guardian replacement,
-- cancellation before release,
+- owner hard cancellation before release,
 - deterministic seeded replay.
 
 ## When You Must Stop Instead of Coding

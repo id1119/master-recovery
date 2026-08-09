@@ -11,7 +11,7 @@ pub enum RecoveryEvent {
     BeginAccepted,
     ReleaseCertificateReady,
     GuardianThresholdReached,
-    CancelCertificateObserved,
+    OwnerCancelObserved,
     ExpiryReached,
 }
 
@@ -118,7 +118,7 @@ impl RecoveryMachine {
                 RecoveryState::AwaitingApprovals
                 | RecoveryState::Authorized
                 | RecoveryState::DelayPending,
-                RecoveryEvent::CancelCertificateObserved,
+                RecoveryEvent::OwnerCancelObserved,
             ) => {
                 self.state = RecoveryState::Cancelled;
                 vec![Action::RefuseRelease, Action::ZeroizeRecoverySecrets]

@@ -41,7 +41,7 @@ Corrupted guardian material must be detected before reconstruction.
 
 If an attacker compromises the signer threshold, it can authorize a malicious recovery and reconstruct A.
 
-The delay and cancellation mechanism provide a reaction window; they do not make a compromised signer threshold harmless.
+The delay and owner hard-cancellation mechanism provide a reaction window while the owner retains its per-config cancellation key; they do not make a compromised signer threshold harmless.
 
 ### Guardian Threshold Compromise
 
@@ -79,25 +79,43 @@ The protocol does not use drand as a security-critical delay because the project
 
 The simulator may compress the delay for visualization, but the production configuration must enforce at least 24 hours.
 
-## 4. Cancellation Model
+## 4. Owner Hard-Cancellation Model
 
-Recovery uses two signer phases:
+Recovery uses two signer approval phases:
 
 1. BeginRecoveryCertificate starts the guardian-local delay.
 2. ReleaseCertificate is required after the delay before release.
 
-Cancellation is threshold-signed and request-specific.
+Cancellation is owner-only and request-specific. Setup creates an independent
+per-config cancellation signing key. Its private half remains only in the
+owner's private control state; guardians pin the public half.
 
-A guardian that observes a valid cancellation must never release for that request.
+A guardian that observes a valid owner signature must never release for that request.
 
 If cancellation is observed before Begin because the network reordered
 messages, the guardian stores a tombstone and rejects the later Begin.
 
-A signer that has cancelled must not later issue a release vote for the same request.
+The guardian persists that tombstone before returning a signed
+`OwnerCancelAck` bound to the exact cancellation transcript. The owner accepts
+the distributed cancel as complete only after verifying acknowledgements from
+at least `n - k + 1` distinct guardians. This leaves fewer than `k` guardians
+available to satisfy the DEK recovery threshold. The guarantee assumes an
+acknowledging guardian is honest; a malicious node can sign and later violate
+its promise.
+
+An honest guardian records release before transmitting its contribution and
+will not acknowledge a later cancellation. Cancellation is therefore a
+reaction-window mechanism, not a way to revoke shares already delivered to a
+recovery client.
+
+Signers cannot cancel. The owner cancellation key cannot authorize Begin or
+Release and cannot decrypt protocol material.
 
 Guardians fail closed when release state is ambiguous.
 
-This design reduces reliance on proving the absence of a cancellation message over an unreliable network.
+The owner key is a single point of availability for cancellation. Losing it
+does not expose the secret, but it removes the owner's ability to cancel. Its
+compromise permits denial of service through valid cancellations, not recovery.
 
 ## 5. Post-Quantum Scope
 
@@ -117,10 +135,10 @@ The UI and documentation must not call the whole system fully post-quantum while
 3. Fewer than k valid DEK shares do not reconstruct DEK.
 4. A wrong A fails to decrypt guardian DEK shares.
 5. A guardian releases only for the exact approved request/recipient after its local delay and required release certificate.
-6. A valid observed cancellation permanently kills the request for an honest guardian.
+6. A valid observed owner hard cancellation permanently kills the request for an honest guardian.
 7. Tampered guardian material is rejected before reconstruction.
 8. A stale config version, replayed request id, or reused request nonce is rejected.
-9. Release and cancellation votes prove pseudonymous signer membership against the pinned signer-set commitment.
+9. Release votes prove pseudonymous signer membership against the pinned signer-set commitment; owner cancellation proves possession of the pinned per-config cancellation private key.
 10. The guardian roster is not stored publicly in plaintext.
 11. Final plaintext reconstruction occurs only on the recovery client.
 

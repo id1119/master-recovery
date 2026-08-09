@@ -27,8 +27,9 @@ network-setup: network-up
 		--guardian http://guardian-3:8080 --guardian http://guardian-4:8080 \
 		--guardian http://guardian-5:8080 --guardian http://guardian-6:8080 \
 		--guardian http://guardian-7:8080 --guardian http://guardian-8:8080 \
-		--signer-threshold 2 --cancellation-threshold 2 --guardian-threshold 5 \
-		--delay-secs 5 --card /demo/recovery-card.json
+		--signer-threshold 2 --guardian-threshold 5 \
+		--delay-secs 5 --card /demo/recovery-card.json \
+		--owner-control /demo/owner-control.json
 
 network-recover:
 	docker compose -f compose.network.yml run --rm client recover \
@@ -37,7 +38,8 @@ network-recover:
 network-cancel:
 	$(MAKE) network-setup
 	docker compose -f compose.network.yml run --rm client recover \
-		--card /demo/recovery-card.json --cancel-before-release
+		--card /demo/recovery-card.json --owner-control /demo/owner-control.json \
+		--cancel-before-release
 
 network-demo: network-setup network-recover
 

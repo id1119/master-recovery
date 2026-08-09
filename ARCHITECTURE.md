@@ -160,7 +160,7 @@ Commands for:
 
 - setup,
 - recovery,
-- signer approval/cancel/release,
+- signer approval/release and owner hard-cancel,
 - guardian simulation,
 - scripted demo,
 - deterministic replay.

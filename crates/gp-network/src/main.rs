@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::{
-    client::{RecoverOptions, SetupOptions},
+    client::{CancelOptions, RecoverOptions, SetupOptions},
     server::{NodeRole, ServeConfig},
 };
 
@@ -65,14 +65,14 @@ enum Command {
         guardian: Vec<String>,
         #[arg(long, default_value_t = 2)]
         signer_threshold: u16,
-        #[arg(long, default_value_t = 2)]
-        cancellation_threshold: u16,
         #[arg(long, default_value_t = 5)]
         guardian_threshold: u16,
         #[arg(long, default_value_t = gp_types::PRODUCTION_MIN_DELAY_SECS)]
         delay_secs: u64,
         #[arg(long, default_value = "/demo/recovery-card.json")]
         card: String,
+        #[arg(long, default_value = "/demo/owner-control.json")]
+        owner_control: String,
     },
     /// Recover through actual relay, signer, guardian, and config-store processes.
     Recover {
@@ -80,8 +80,21 @@ enum Command {
         card: String,
         #[arg(long)]
         output: Option<String>,
+        #[arg(long)]
+        request_out: Option<String>,
         #[arg(long, default_value_t = false)]
         cancel_before_release: bool,
+        #[arg(long, default_value = "/demo/owner-control.json")]
+        owner_control: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Permanently cancel one exact recovery request with the setup-time owner key.
+    Cancel {
+        #[arg(long)]
+        request: String,
+        #[arg(long, default_value = "/demo/owner-control.json")]
+        owner_control: String,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -141,10 +154,10 @@ async fn main() -> Result<()> {
             signer,
             guardian,
             signer_threshold,
-            cancellation_threshold,
             guardian_threshold,
             delay_secs,
             card,
+            owner_control,
         } => {
             let secret = match (secret, secret_file) {
                 (Some(value), None) => value.into_bytes(),
@@ -162,10 +175,10 @@ async fn main() -> Result<()> {
                 signers: signer,
                 guardians: guardian,
                 signer_threshold,
-                cancellation_threshold,
                 guardian_threshold,
                 delay_secs,
                 card_path: card,
+                owner_control_path: owner_control,
             })
             .await?;
             println!("Recovery Card config id: {}", hex::encode(card.config_id));
@@ -173,13 +186,17 @@ async fn main() -> Result<()> {
         Command::Recover {
             card,
             output,
+            request_out,
             cancel_before_release,
+            owner_control,
             json,
         } => {
             let result = client::recover(RecoverOptions {
                 card_path: card,
                 output_path: output,
+                request_out_path: request_out,
                 cancel_before_release,
+                owner_control_path: owner_control,
             })
             .await?;
             if json {
@@ -190,6 +207,25 @@ async fn main() -> Result<()> {
                 println!(
                     "NETWORK RESULT: recovered {:?}; rejected guardians {:?}",
                     result.recovered_secret, result.rejected_guardians
+                );
+            }
+        }
+        Command::Cancel {
+            request,
+            owner_control,
+            json,
+        } => {
+            let result = client::cancel(CancelOptions {
+                request_path: request,
+                owner_control_path: owner_control,
+            })
+            .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!(
+                    "OWNER HARD CANCEL: request {} permanently cancelled on {} guardians",
+                    result.request_id, result.guardian_acknowledgements
                 );
             }
         }

@@ -1,4 +1,5 @@
 /target/
 /.demo-state/
 *.log
-
+/demo-data/*
+!/demo-data/.gitkeep

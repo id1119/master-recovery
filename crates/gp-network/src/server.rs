@@ -15,9 +15,11 @@ use axum::{
     routing::{get, post},
 };
 use gp_core::GuardianMachine;
-use gp_crypto::{RecipientKeyPair, XWING_PUBLIC_KEY_LEN, seal_to_recipient, sign, signing_key};
+use gp_crypto::{
+    RecipientKeyPair, XWING_PUBLIC_KEY_LEN, seal_to_recipient, sha256, sign, signing_key,
+};
 use gp_types::{
-    CancelVote, GuardianContribution, PRODUCTION_MIN_DELAY_SECS, PROTOCOL_VERSION, ReleaseVote,
+    GuardianContribution, OwnerCancelAck, PRODUCTION_MIN_DELAY_SECS, PROTOCOL_VERSION, ReleaseVote,
     SealedMessage, SignerContribution,
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -26,7 +28,7 @@ use tokio::sync::Mutex;
 use crate::{
     protocol::{
         random_id, random_nonce, request_digest, sign_guardian_contribution,
-        validate_begin_for_policy, validate_cancel_for_policy, validate_release_for_policy,
+        validate_begin_for_policy, validate_owner_cancel_for_policy, validate_release_for_policy,
         wall_now,
     },
     types::{
@@ -183,23 +185,31 @@ pub async fn serve(config: ServeConfig) -> Result<()> {
     let router = match config.role {
         NodeRole::Relay => relay_router(
             identity,
-            config.data_dir.join("relay-state.json"),
+            config
+                .data_dir
+                .join(format!("relay-state-v{PROTOCOL_VERSION}.json")),
             config.relay_token,
         )?,
         NodeRole::ConfigStore => config_router(
             identity,
-            config.data_dir.join("config-state.json"),
+            config
+                .data_dir
+                .join(format!("config-state-v{PROTOCOL_VERSION}.json")),
             config.admin_token,
         )?,
         NodeRole::Signer => signer_router(
             identity,
-            config.data_dir.join("signer-state.json"),
+            config
+                .data_dir
+                .join(format!("signer-state-v{PROTOCOL_VERSION}.json")),
             config.auto_approve,
             config.admin_token,
         )?,
         NodeRole::Guardian => guardian_router(
             identity,
-            config.data_dir.join("guardian-state.json"),
+            config
+                .data_dir
+                .join(format!("guardian-state-v{PROTOCOL_VERSION}.json")),
             config.allow_insecure_demo_delay,
             config.corrupt_contribution,
             config.admin_token,
@@ -524,13 +534,13 @@ fn open_mailbox_request(
 
 fn seal_mailbox_response(
     mailbox: &str,
-    request: &gp_types::RecoveryRequest,
+    response_recipient_key: &[u8],
     response: &MailboxResponse,
 ) -> Result<SealedMailboxBody> {
     let bytes = serde_json::to_vec(response)?;
     Ok(SealedMailboxBody {
         sealed: seal_to_recipient(
-            &request.recovery_recipient_key,
+            response_recipient_key,
             random_id(),
             random_nonce(),
             &bytes,
@@ -648,14 +658,6 @@ async fn signer_mailbox(
                     "signer never approved this exact request",
                 ));
             }
-            signer
-                .may_release(
-                    request.config_id,
-                    request.config_version,
-                    &request.request_id,
-                    &digest,
-                )
-                .map_err(ApiError::bad_request)?;
             let mut vote = ReleaseVote {
                 protocol_version: PROTOCOL_VERSION,
                 config_id: request.config_id,
@@ -675,34 +677,6 @@ async fn signer_mailbox(
             );
             MailboxResponse::ReleaseVote(vote)
         }
-        MailboxRequest::SignerCancel { reason_code, .. } => {
-            let mut vote = CancelVote {
-                protocol_version: PROTOCOL_VERSION,
-                config_id: request.config_id,
-                config_version: request.config_version,
-                request_id: request.request_id,
-                request_digest: digest,
-                reason_code,
-                nonce: request.nonce,
-                signer_id: signer.signer_id,
-                signer_public_key: signer.signing_public_key,
-                signer_membership_proof: signer.membership_proof.clone(),
-                signer_signature: vec![],
-            };
-            vote.signer_signature = sign(
-                &signing_key(signer.signing_seed),
-                &gp_wire::cancel_vote(&vote).map_err(ApiError::bad_request)?,
-            );
-            signer
-                .mark_cancelled(
-                    request.config_id,
-                    request.config_version,
-                    request.request_id,
-                    digest,
-                )
-                .map_err(ApiError::bad_request)?;
-            MailboxResponse::CancelVote(vote)
-        }
         _ => return Err(ApiError::bad_request("request is not valid for a signer")),
     };
     store.save().map_err(ApiError::bad_request)?;
@@ -712,7 +686,7 @@ async fn signer_mailbox(
         &mailbox[..10]
     );
     drop(store);
-    seal_mailbox_response(&mailbox, &request, &response)
+    seal_mailbox_response(&mailbox, &request.recovery_recipient_key, &response)
         .map(Json)
         .map_err(ApiError::bad_request)
 }
@@ -825,6 +799,12 @@ async fn guardian_mailbox(
     let action =
         open_mailbox_request(&state.identity, &mailbox, &body).map_err(ApiError::bad_request)?;
     let request = action.request().clone();
+    let response_recipient_key = match &action {
+        MailboxRequest::GuardianCancel { certificate, .. } => {
+            certificate.cancel_response_recipient_key.clone()
+        }
+        _ => request.recovery_recipient_key.clone(),
+    };
     let wall = wall_now().map_err(ApiError::bad_request)?;
     let monotonic = monotonic_now().map_err(ApiError::bad_request)?;
     let current_boot = boot_id();
@@ -881,8 +861,13 @@ async fn guardian_mailbox(
                 }
             }
             MailboxRequest::GuardianCancel { certificate, .. } => {
-                validate_cancel_for_policy(&certificate, policy, &request, wall)
+                validate_owner_cancel_for_policy(&certificate, policy, &request, wall)
                     .map_err(ApiError::bad_request)?;
+                if entry.released.get(&key) == Some(&digest) {
+                    return Err(ApiError::bad_request(
+                        "guardian already released material for this request",
+                    ));
+                }
                 if entry
                     .cancelled
                     .get(&key)
@@ -891,7 +876,23 @@ async fn guardian_mailbox(
                     return Err(ApiError::bad_request("cancellation digest conflict"));
                 }
                 entry.cancelled.insert(key, digest);
-                MailboxResponse::CancellationAccepted
+                let mut ack = OwnerCancelAck {
+                    protocol_version: PROTOCOL_VERSION,
+                    config_id: request.config_id,
+                    config_version: request.config_version,
+                    request_id: request.request_id,
+                    request_digest: digest,
+                    owner_cancel_transcript_digest: sha256(
+                        &gp_wire::owner_cancel(&certificate).map_err(ApiError::bad_request)?,
+                    ),
+                    guardian_index: entry.provision.record.guardian_index,
+                    guardian_signature: vec![],
+                };
+                ack.guardian_signature = sign(
+                    &signing_key(entry.provision.signing_seed),
+                    &gp_wire::owner_cancel_ack(&ack).map_err(ApiError::bad_request)?,
+                );
+                MailboxResponse::CancellationAccepted(ack)
             }
             MailboxRequest::GuardianRelease { certificate, .. } => {
                 validate_release_for_policy(&certificate, policy, &request, wall)
@@ -937,10 +938,11 @@ async fn guardian_mailbox(
                 {
                     *byte ^= 1;
                 }
-                MailboxResponse::GuardianContribution(
+                let contribution =
                     sign_guardian_contribution(contribution, entry.provision.signing_seed)
-                        .map_err(ApiError::bad_request)?,
-                )
+                        .map_err(ApiError::bad_request)?;
+                entry.released.insert(key, digest);
+                MailboxResponse::GuardianContribution(contribution)
             }
             _ => return Err(ApiError::bad_request("request is not valid for a guardian")),
         }
@@ -952,7 +954,7 @@ async fn guardian_mailbox(
         &mailbox[..10]
     );
     drop(store);
-    seal_mailbox_response(&mailbox, &request, &response)
+    seal_mailbox_response(&mailbox, &response_recipient_key, &response)
         .map(Json)
         .map_err(ApiError::bad_request)
 }

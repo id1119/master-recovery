@@ -118,8 +118,9 @@ Be explicit:
 | Party | What it may inherently know |
 |---|---|
 | Owner | Its own secret/configuration |
+| Owner control device | Its per-config cancellation private key and the exact request it chooses to cancel |
 | Recovery client | The recovered secret after successful reconstruction |
-| Individual signer | It was asked to approve/cancel/release some pseudonymous recovery request |
+| Individual signer | It was asked to approve/release some pseudonymous recovery request |
 | Individual guardian | One of its opaque stored records was accessed/released |
 | Mix hop | Adjacent-hop timing/volume for packets it forwards |
 | Passive global observer | Network timing/volume and approximate size buckets, but not plaintext contents |

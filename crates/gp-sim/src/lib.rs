@@ -12,11 +12,10 @@ use gp_crypto::{
 use gp_storage::{ConfigStore, GuardianState, SignerState, StorageError};
 use gp_transport::{ObserverSummary, TransportConfig, protect_payload, simulate_observer};
 use gp_types::{
-    AeadCiphertext, BeginRecoveryCertificate, CancelCertificate, CancelVote, ConfigCapsule,
-    CryptoSuite, GuardianContribution, GuardianPolicy, GuardianRecord, GuardianRoute, Id32,
-    MetadataMode, PRODUCTION_MIN_DELAY_SECS, PROTOCOL_VERSION, RecoveryCard, RecoveryDescriptor,
-    RecoveryRequest, RecoveryState, ReleaseCertificate, ReleaseVote, SetupPolicy,
-    SignerContribution, SignerPolicy,
+    AeadCiphertext, BeginRecoveryCertificate, ConfigCapsule, CryptoSuite, GuardianContribution,
+    GuardianPolicy, GuardianRecord, GuardianRoute, Id32, MetadataMode, OwnerCancelCertificate,
+    PRODUCTION_MIN_DELAY_SECS, PROTOCOL_VERSION, RecoveryCard, RecoveryDescriptor, RecoveryRequest,
+    RecoveryState, ReleaseCertificate, ReleaseVote, SetupPolicy, SignerContribution, SignerPolicy,
 };
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -58,7 +57,6 @@ pub struct DemoOptions {
     pub simulated_delay_secs: u64,
     pub signer_count: u16,
     pub signer_threshold: u16,
-    pub cancellation_threshold: u16,
     pub guardian_count: u16,
     pub guardian_threshold: u16,
     pub network_latency_ms: u64,
@@ -81,7 +79,6 @@ impl Default for DemoOptions {
             simulated_delay_secs: 5,
             signer_count: 3,
             signer_threshold: 2,
-            cancellation_threshold: 2,
             guardian_count: 8,
             guardian_threshold: 5,
             network_latency_ms: 120,
@@ -113,11 +110,6 @@ impl DemoOptions {
         if self.signer_threshold == 0 || self.signer_threshold > self.signer_count {
             return Err(SimError::InvalidOptions(
                 "signer threshold must be between 1 and the signer count".into(),
-            ));
-        }
-        if self.cancellation_threshold == 0 || self.cancellation_threshold > self.signer_count {
-            return Err(SimError::InvalidOptions(
-                "cancellation threshold must be between 1 and the signer count".into(),
             ));
         }
         if self.guardian_count == 0 || self.guardian_count > 32 {
@@ -153,11 +145,6 @@ impl DemoOptions {
         if available_signers < self.signer_threshold {
             return Err(SimError::InvalidOptions(
                 "not enough online signers to reach the approval threshold".into(),
-            ));
-        }
-        if self.cancel_before_release && available_signers < self.cancellation_threshold {
-            return Err(SimError::InvalidOptions(
-                "not enough online signers to reach the cancellation threshold".into(),
             ));
         }
         let unavailable_guardians = match (self.offline_guardian, self.corrupt_guardian) {
@@ -233,6 +220,7 @@ struct DemoWorld {
     guardians: Vec<GuardianState>,
     config_store: ConfigStore,
     authorization_key: SecretVec,
+    owner_cancel_signing_seed: SecretVec,
 }
 
 pub fn run_demo(options: &DemoOptions) -> Result<DemoResult, SimError> {
@@ -241,7 +229,6 @@ pub fn run_demo(options: &DemoOptions) -> Result<DemoResult, SimError> {
     let policy = SetupPolicy {
         signer_count: options.signer_count,
         signer_threshold: options.signer_threshold,
-        cancellation_threshold: options.cancellation_threshold,
         guardian_count: options.guardian_count,
         guardian_threshold: options.guardian_threshold,
         minimum_recovery_delay: gp_types::PRODUCTION_MIN_DELAY_SECS,
@@ -391,19 +378,20 @@ pub fn run_demo(options: &DemoOptions) -> Result<DemoResult, SimError> {
 
     if options.cancel_before_release {
         at += options.simulated_delay_secs.saturating_sub(1);
-        let cancel = make_cancel_certificate(
-            &mut world.signers,
+        let cancel_recipient = RecipientKeyPair::from_seed(random_id(&mut rng));
+        let cancel = make_owner_cancel_certificate(
+            &world.owner_cancel_signing_seed,
             &request,
             request_digest,
-            options.offline_signer,
-            capsule.cancellation_threshold,
+            cancel_recipient.public_key().to_vec(),
+            at,
         )?;
-        validate_cancel_certificate(&cancel, &capsule, &request, at)?;
+        validate_owner_cancel_certificate(&cancel, &capsule, &request, at)?;
         for machine in &mut guardian_machines {
             machine.cancel(request.request_id, request_digest, true)?;
         }
         recovery_machine.apply(
-            RecoveryEvent::CancelCertificateObserved,
+            RecoveryEvent::OwnerCancelObserved,
             at,
             options.simulated_delay_secs,
         )?;
@@ -411,8 +399,8 @@ pub fn run_demo(options: &DemoOptions) -> Result<DemoResult, SimError> {
             &mut events,
             at,
             "CANCEL",
-            "signers",
-            "Threshold-valid cancellation permanently killed the exact request; release attempt refused.",
+            "owner",
+            "The setup-time owner key permanently cancelled the exact request; the raced release was refused.",
             Some(recovery_machine.state()),
         );
         let refused = guardian_machines[0].authorize_release(
@@ -620,6 +608,13 @@ fn setup_world(
     rotation: Option<(Id32, u64)>,
 ) -> Result<DemoWorld, SimError> {
     let (config_id, config_version) = rotation.unwrap_or_else(|| (random_id(rng), 1));
+    let owner_cancel_signing_seed = SecretVec::new(random_id(rng).to_vec());
+    let owner_cancel_public_key = verifying_key_bytes(&signing_key(
+        owner_cancel_signing_seed
+            .as_slice()
+            .try_into()
+            .map_err(|_| SimError::RecoveryMismatch)?,
+    ));
     let authorization_key = SecretVec::new(random_id(rng).to_vec());
     let dek = SecretVec::new(random_id(rng).to_vec());
     let a_shares = split_secret(
@@ -647,11 +642,9 @@ fn setup_world(
                 config_version,
                 signer_set_commitment: [0; 32],
                 signer_threshold: policy.signer_threshold,
-                cancellation_threshold: policy.cancellation_threshold,
             },
             seen_requests: BTreeMap::new(),
             seen_nonces: BTreeSet::new(),
-            cancelled_requests: BTreeMap::new(),
         });
     }
     let (signer_root, signer_proofs) = merkle_commit(&signer_leaves)?;
@@ -746,7 +739,7 @@ fn setup_world(
                 signer_set_commitment: signer_root,
                 signer_count: policy.signer_count,
                 signer_threshold: policy.signer_threshold,
-                cancellation_threshold: policy.cancellation_threshold,
+                owner_cancel_public_key,
                 minimum_recovery_delay: policy.minimum_recovery_delay,
                 guardian_material_root: guardian_root,
             },
@@ -787,11 +780,11 @@ fn setup_world(
         config_version,
         signer_count: policy.signer_count,
         signer_threshold: policy.signer_threshold,
-        cancellation_threshold: policy.cancellation_threshold,
         guardian_count: policy.guardian_count,
         guardian_threshold: policy.guardian_threshold,
         minimum_recovery_delay: policy.minimum_recovery_delay,
         signer_set_commitment: signer_root,
+        owner_cancel_public_key,
         guardian_material_commitment: guardian_root,
         encrypted_recovery_descriptor,
         max_request_lifetime: 86_400 * 7,
@@ -804,6 +797,7 @@ fn setup_world(
             .map(|signer| signer.mailbox.clone())
             .collect(),
         signer_set_commitment: signer_root,
+        owner_cancel_public_key,
     };
     let mut config_store = ConfigStore::default();
     config_store.put(capsule.clone())?;
@@ -813,6 +807,7 @@ fn setup_world(
         guardians,
         config_store,
         authorization_key,
+        owner_cancel_signing_seed,
     })
 }
 
@@ -823,8 +818,6 @@ fn validate_capsule_against_card(
     let invalid_thresholds = capsule.signer_count == 0
         || capsule.signer_threshold == 0
         || capsule.signer_threshold > capsule.signer_count
-        || capsule.cancellation_threshold == 0
-        || capsule.cancellation_threshold > capsule.signer_count
         || capsule.guardian_count == 0
         || capsule.guardian_threshold == 0
         || capsule.guardian_threshold > capsule.guardian_count;
@@ -832,6 +825,7 @@ fn validate_capsule_against_card(
         || capsule.crypto_suite != CryptoSuite::default()
         || capsule.config_id != card.config_id
         || capsule.signer_set_commitment != card.signer_set_commitment
+        || capsule.owner_cancel_public_key != card.owner_cancel_public_key
         || invalid_thresholds
         || capsule.minimum_recovery_delay < PRODUCTION_MIN_DELAY_SECS
         || capsule.max_request_lifetime == 0
@@ -924,7 +918,7 @@ fn validate_guardian_policy(
         || policy.signer_set_commitment != capsule.signer_set_commitment
         || policy.signer_count != capsule.signer_count
         || policy.signer_threshold != capsule.signer_threshold
-        || policy.cancellation_threshold != capsule.cancellation_threshold
+        || policy.owner_cancel_public_key != capsule.owner_cancel_public_key
         || policy.minimum_recovery_delay != capsule.minimum_recovery_delay
         || policy.guardian_material_root != capsule.guardian_material_commitment
     {
@@ -1087,12 +1081,6 @@ fn make_release_certificate(
         if offline == Some(signer.signer_id) {
             continue;
         }
-        signer.may_release(
-            request.config_id,
-            request.config_version,
-            &request.request_id,
-            &request_digest,
-        )?;
         let mut vote = ReleaseVote {
             protocol_version: PROTOCOL_VERSION,
             config_id: request.config_id,
@@ -1162,90 +1150,64 @@ fn validate_release_certificate(
     }
 }
 
-fn make_cancel_certificate(
-    signers: &mut [SignerState],
+fn make_owner_cancel_certificate(
+    owner_cancel_signing_seed: &[u8],
     request: &RecoveryRequest,
     request_digest: Id32,
-    offline: Option<u16>,
-    threshold: u16,
-) -> Result<CancelCertificate, SimError> {
-    let mut votes = Vec::new();
-    for signer in signers.iter_mut() {
-        if offline == Some(signer.signer_id) {
-            continue;
-        }
-        let mut vote = CancelVote {
-            protocol_version: PROTOCOL_VERSION,
-            config_id: request.config_id,
-            config_version: request.config_version,
-            request_id: request.request_id,
-            request_digest,
-            reason_code: 1,
-            nonce: request.nonce,
-            signer_id: signer.signer_id,
-            signer_public_key: signer.signing_public_key,
-            signer_membership_proof: signer.membership_proof.clone(),
-            signer_signature: vec![],
-        };
-        vote.signer_signature = sign(
-            &signing_key(signer.signing_seed),
-            &gp_wire::cancel_vote(&vote)?,
-        );
-        signer.mark_cancelled(
-            request.config_id,
-            request.config_version,
-            request.request_id,
-            request_digest,
-        )?;
-        votes.push(vote);
-        if votes.len() == usize::from(threshold) {
-            break;
-        }
-    }
-    if votes.len() < usize::from(threshold) {
-        Err(SimError::Threshold)
-    } else {
-        Ok(CancelCertificate { votes })
-    }
+    cancel_response_recipient_key: Vec<u8>,
+    issued_at: u64,
+) -> Result<OwnerCancelCertificate, SimError> {
+    let seed: Id32 = owner_cancel_signing_seed
+        .try_into()
+        .map_err(|_| SimError::InvalidCertificate)?;
+    let key = signing_key(seed);
+    let mut certificate = OwnerCancelCertificate {
+        protocol_version: PROTOCOL_VERSION,
+        config_id: request.config_id,
+        config_version: request.config_version,
+        request_id: request.request_id,
+        request_digest,
+        recovery_recipient_key: request.recovery_recipient_key.clone(),
+        cancel_response_recipient_key,
+        reason_code: 1,
+        nonce: request.nonce,
+        issued_at,
+        owner_cancel_public_key: verifying_key_bytes(&key),
+        owner_signature: vec![],
+    };
+    certificate.owner_signature = sign(&key, &gp_wire::owner_cancel(&certificate)?);
+    Ok(certificate)
 }
 
-fn validate_cancel_certificate(
-    certificate: &CancelCertificate,
+fn validate_owner_cancel_certificate(
+    certificate: &OwnerCancelCertificate,
     capsule: &ConfigCapsule,
     request: &RecoveryRequest,
     now: u64,
 ) -> Result<(), SimError> {
     validate_recovery_request(request, capsule, now)?;
     let request_digest = sha256(&gp_wire::request_digest_preimage(request)?);
-    let mut ids = BTreeSet::new();
-    for vote in &certificate.votes {
-        if vote.protocol_version != PROTOCOL_VERSION
-            || vote.config_id != request.config_id
-            || vote.config_version != request.config_version
-            || vote.request_id != request.request_id
-            || vote.request_digest != request_digest
-            || vote.nonce != request.nonce
-            || !ids.insert(vote.signer_id)
-        {
-            return Err(SimError::InvalidCertificate);
-        }
-        validate_signer_membership(
-            vote.signer_id,
-            &vote.signer_public_key,
-            &vote.signer_membership_proof,
-            capsule,
-        )?;
-        verify(
-            &vote.signer_public_key,
-            &gp_wire::cancel_vote(vote)?,
-            &vote.signer_signature,
-        )?;
+    if certificate.protocol_version != PROTOCOL_VERSION
+        || certificate.config_id != request.config_id
+        || certificate.config_version != request.config_version
+        || certificate.request_id != request.request_id
+        || certificate.request_digest != request_digest
+        || certificate.recovery_recipient_key != request.recovery_recipient_key
+        || certificate.cancel_response_recipient_key.len() != XWING_PUBLIC_KEY_LEN
+        || certificate.nonce != request.nonce
+        || certificate.issued_at < request.requested_at
+        || certificate.issued_at > now
+        || certificate.issued_at >= request.expiry
+        || certificate.owner_cancel_public_key != capsule.owner_cancel_public_key
+    {
+        return Err(SimError::InvalidCertificate);
     }
-    if ids.len() < usize::from(capsule.cancellation_threshold) {
-        Err(SimError::Threshold)
-    } else {
-        Ok(())
-    }
+    verify(
+        &capsule.owner_cancel_public_key,
+        &gp_wire::owner_cancel(certificate)?,
+        &certificate.owner_signature,
+    )?;
+    Ok(())
 }
 
 fn validate_guardian_contribution(
@@ -1393,7 +1355,6 @@ mod tests {
         let policy = SetupPolicy {
             signer_count: options.signer_count,
             signer_threshold: options.signer_threshold,
-            cancellation_threshold: options.cancellation_threshold,
             guardian_count: options.guardian_count,
             guardian_threshold: options.guardian_threshold,
             minimum_recovery_delay: PRODUCTION_MIN_DELAY_SECS,
@@ -1509,18 +1470,41 @@ mod tests {
     }
 
     #[test]
-    fn cancel_certificate_is_bound_to_exact_request_id_and_nonce() {
-        let (mut world, capsule, _recipient, request) = fixture();
+    fn owner_cancel_is_bound_to_exact_request_and_pinned_key() {
+        let (world, capsule, recipient, request) = fixture();
         let digest = sha256(&gp_wire::request_digest_preimage(&request).unwrap());
-        let mut certificate =
-            make_cancel_certificate(&mut world.signers, &request, digest, None, 2).unwrap();
-        certificate.votes[0].request_id[0] ^= 1;
-        let signer = &world.signers[usize::from(certificate.votes[0].signer_id - 1)];
-        certificate.votes[0].signer_signature = sign(
-            &signing_key(signer.signing_seed),
-            &gp_wire::cancel_vote(&certificate.votes[0]).unwrap(),
+        let mut certificate = make_owner_cancel_certificate(
+            &world.owner_cancel_signing_seed,
+            &request,
+            digest,
+            recipient.public_key().to_vec(),
+            11,
+        )
+        .unwrap();
+        certificate.request_id[0] ^= 1;
+        let owner_seed: Id32 = world
+            .owner_cancel_signing_seed
+            .as_slice()
+            .try_into()
+            .unwrap();
+        certificate.owner_signature = sign(
+            &signing_key(owner_seed),
+            &gp_wire::owner_cancel(&certificate).unwrap(),
         );
-        assert!(validate_cancel_certificate(&certificate, &capsule, &request, 11).is_err());
+        assert!(validate_owner_cancel_certificate(&certificate, &capsule, &request, 11).is_err());
+
+        let wrong_key_certificate = make_owner_cancel_certificate(
+            &[99; 32],
+            &request,
+            digest,
+            recipient.public_key().to_vec(),
+            11,
+        )
+        .unwrap();
+        assert!(
+            validate_owner_cancel_certificate(&wrong_key_certificate, &capsule, &request, 11)
+                .is_err()
+        );
     }
 
     #[test]

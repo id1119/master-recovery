@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gp_storage::SignerState;
 use gp_types::{
-    BeginRecoveryCertificate, CancelCertificate, CancelVote, ConfigCapsule, GuardianContribution,
-    GuardianRecord, Id32, RecoveryRequest, ReleaseCertificate, ReleaseVote, SealedMessage,
-    SignerContribution,
+    BeginRecoveryCertificate, ConfigCapsule, GuardianContribution, GuardianRecord, Id32,
+    OwnerCancelAck, OwnerCancelCertificate, RecoveryRequest, ReleaseCertificate, ReleaseVote,
+    SealedMessage, SignerContribution,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,16 +40,12 @@ pub enum MailboxRequest {
     SignerRelease {
         request: RecoveryRequest,
     },
-    SignerCancel {
-        request: RecoveryRequest,
-        reason_code: u16,
-    },
     GuardianBegin {
         certificate: BeginRecoveryCertificate,
     },
     GuardianCancel {
         request: RecoveryRequest,
-        certificate: CancelCertificate,
+        certificate: Box<OwnerCancelCertificate>,
     },
     GuardianRelease {
         request: RecoveryRequest,
@@ -62,7 +58,6 @@ impl MailboxRequest {
         match self {
             Self::SignerApprove { request }
             | Self::SignerRelease { request }
-            | Self::SignerCancel { request, .. }
             | Self::GuardianCancel { request, .. }
             | Self::GuardianRelease { request, .. } => request,
             Self::GuardianBegin { certificate } => &certificate.request,
@@ -75,9 +70,8 @@ impl MailboxRequest {
 pub enum MailboxResponse {
     SignerContribution(SignerContribution),
     ReleaseVote(ReleaseVote),
-    CancelVote(CancelVote),
     BeginAccepted { not_before_monotonic: u64 },
-    CancellationAccepted,
+    CancellationAccepted(OwnerCancelAck),
     ReleaseRefused { reason: String },
     GuardianContribution(GuardianContribution),
 }
@@ -87,9 +81,8 @@ impl MailboxResponse {
         match self {
             Self::SignerContribution(_) => "signer_contribution",
             Self::ReleaseVote(_) => "release_vote",
-            Self::CancelVote(_) => "cancel_vote",
             Self::BeginAccepted { .. } => "begin_accepted",
-            Self::CancellationAccepted => "cancellation_accepted",
+            Self::CancellationAccepted(_) => "cancellation_accepted",
             Self::ReleaseRefused { .. } => "release_refused",
             Self::GuardianContribution(_) => "guardian_contribution",
         }
@@ -141,6 +134,8 @@ pub struct GuardianEntry {
     pub provision: GuardianProvision,
     pub pending: BTreeMap<String, PendingNetworkRecovery>,
     pub cancelled: BTreeMap<String, Id32>,
+    #[serde(default)]
+    pub released: BTreeMap<String, Id32>,
     pub seen_nonces: BTreeSet<Id32>,
 }
 
@@ -150,6 +145,7 @@ impl GuardianEntry {
             provision,
             pending: BTreeMap::new(),
             cancelled: BTreeMap::new(),
+            released: BTreeMap::new(),
             seen_nonces: BTreeSet::new(),
         }
     }
@@ -191,6 +187,32 @@ pub struct NetworkDemoResult {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OwnerCancelResult {
+    pub config_id: String,
+    pub request_id: String,
+    pub guardian_acknowledgements: usize,
+    pub permanently_cancelled: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SealedMailboxBody {
     pub sealed: SealedMessage,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OwnerControlFile {
+    pub protocol_version: u16,
+    pub config_id: Id32,
+    pub config_version: u64,
+    pub owner_cancel_signing_seed: Id32,
+    pub owner_cancel_public_key: [u8; 32],
+    pub guardian_count: u16,
+    pub guardian_threshold: u16,
+    pub guardian_routes: Vec<gp_types::GuardianRoute>,
+}
+
+impl Drop for OwnerControlFile {
+    fn drop(&mut self) {
+        self.owner_cancel_signing_seed.fill(0);
+    }
 }

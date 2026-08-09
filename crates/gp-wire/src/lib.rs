@@ -1,7 +1,8 @@
 //! Canonical, length-prefixed protocol transcripts.
 
 use gp_types::{
-    CancelVote, CryptoSuite, GuardianContribution, RecoveryRequest, ReleaseVote, SealedMessage,
+    CryptoSuite, GuardianContribution, OwnerCancelAck, OwnerCancelCertificate, RecoveryRequest,
+    ReleaseVote, SealedMessage,
 };
 
 const MAX_FIELD_LEN: usize = 16 * 1024 * 1024;
@@ -150,19 +151,33 @@ pub fn guardian_release_context(
     Ok(out.finish())
 }
 
-pub fn cancel_vote(vote: &CancelVote) -> Result<Vec<u8>, WireError> {
+pub fn owner_cancel(certificate: &OwnerCancelCertificate) -> Result<Vec<u8>, WireError> {
     let mut out = Transcript::default();
-    out.domain(b"gp/cancel-vote/v1")?;
-    out.u16(vote.protocol_version);
-    out.bytes(&vote.config_id)?;
-    out.u64(vote.config_version);
-    out.bytes(&vote.request_id)?;
-    out.bytes(&vote.request_digest)?;
-    out.u16(vote.reason_code);
-    out.bytes(&vote.nonce)?;
-    out.u16(vote.signer_id);
-    out.bytes(&vote.signer_public_key)?;
-    out.bytes(&vote.signer_membership_proof)?;
+    out.domain(b"gp/owner-hard-cancel/v1")?;
+    out.u16(certificate.protocol_version);
+    out.bytes(&certificate.config_id)?;
+    out.u64(certificate.config_version);
+    out.bytes(&certificate.request_id)?;
+    out.bytes(&certificate.request_digest)?;
+    out.bytes(&certificate.recovery_recipient_key)?;
+    out.bytes(&certificate.cancel_response_recipient_key)?;
+    out.u16(certificate.reason_code);
+    out.bytes(&certificate.nonce)?;
+    out.u64(certificate.issued_at);
+    out.bytes(&certificate.owner_cancel_public_key)?;
+    Ok(out.finish())
+}
+
+pub fn owner_cancel_ack(ack: &OwnerCancelAck) -> Result<Vec<u8>, WireError> {
+    let mut out = Transcript::default();
+    out.domain(b"gp/owner-hard-cancel-ack/v1")?;
+    out.u16(ack.protocol_version);
+    out.bytes(&ack.config_id)?;
+    out.u64(ack.config_version);
+    out.bytes(&ack.request_id)?;
+    out.bytes(&ack.request_digest)?;
+    out.bytes(&ack.owner_cancel_transcript_digest)?;
+    out.u16(ack.guardian_index);
     Ok(out.finish())
 }
 
@@ -258,7 +273,7 @@ mod tests {
 
     fn request() -> RecoveryRequest {
         RecoveryRequest {
-            protocol_version: 1,
+            protocol_version: gp_types::PROTOCOL_VERSION,
             crypto_suite: CryptoSuite::default(),
             config_id: [1; 32],
             config_version: 1,
@@ -316,5 +331,29 @@ mod tests {
             request,
             mailbox_transport_context("mailbox-b", "request").unwrap()
         );
+    }
+
+    #[test]
+    fn owner_cancel_binds_recovery_and_ack_recipients() {
+        let mut certificate = OwnerCancelCertificate {
+            protocol_version: gp_types::PROTOCOL_VERSION,
+            config_id: [1; 32],
+            config_version: 1,
+            request_id: [2; 32],
+            request_digest: [3; 32],
+            recovery_recipient_key: vec![4; 1216],
+            cancel_response_recipient_key: vec![5; 1216],
+            reason_code: 1,
+            nonce: [6; 32],
+            issued_at: 10,
+            owner_cancel_public_key: [7; 32],
+            owner_signature: vec![],
+        };
+        let original = owner_cancel(&certificate).unwrap();
+        certificate.recovery_recipient_key[0] ^= 1;
+        assert_ne!(original, owner_cancel(&certificate).unwrap());
+        certificate.recovery_recipient_key[0] ^= 1;
+        certificate.cancel_response_recipient_key[0] ^= 1;
+        assert_ne!(original, owner_cancel(&certificate).unwrap());
     }
 }

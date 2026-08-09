@@ -94,10 +94,10 @@ DEK + C -> secret
 
 1. Replay to BeginRecoveryCertificate.
 2. Let the delay almost expire.
-3. Issue threshold-valid cancellation.
+3. Use the setup-time private owner cancellation key to sign the exact request.
 4. Show the request state change to `Cancelled`.
 5. Attempt to continue the release phase.
-6. Honest guardians refuse to release for the cancelled request.
+6. Honest guardians verify the pinned owner public key and refuse release.
 
 ## Leg 5 — Metadata Comparison
 

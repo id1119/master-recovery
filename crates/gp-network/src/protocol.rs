@@ -9,10 +9,10 @@ use gp_crypto::{
 };
 use gp_storage::SignerState;
 use gp_types::{
-    AeadCiphertext, BeginRecoveryCertificate, CancelCertificate, ConfigCapsule, CryptoSuite,
-    GuardianContribution, GuardianPolicy, GuardianRecord, GuardianRoute, Id32, PROTOCOL_VERSION,
-    RecoveryCard, RecoveryDescriptor, RecoveryRequest, ReleaseCertificate, SetupPolicy,
-    SignerPolicy,
+    AeadCiphertext, BeginRecoveryCertificate, ConfigCapsule, CryptoSuite, GuardianContribution,
+    GuardianPolicy, GuardianRecord, GuardianRoute, Id32, OwnerCancelAck, OwnerCancelCertificate,
+    PROTOCOL_VERSION, RecoveryCard, RecoveryDescriptor, RecoveryRequest, ReleaseCertificate,
+    SetupPolicy, SignerPolicy,
 };
 use rand::Rng;
 
@@ -23,6 +23,8 @@ pub struct SetupBundle {
     pub card: RecoveryCard,
     pub signers: Vec<SignerState>,
     pub guardians: Vec<GuardianProvision>,
+    pub owner_cancel_signing_seed: SecretVec,
+    pub owner_guardian_routes: Vec<GuardianRoute>,
 }
 
 pub fn random_id() -> Id32 {
@@ -55,8 +57,6 @@ pub fn create_setup(
         || guardian_mailboxes.len() != usize::from(policy.guardian_count)
         || policy.signer_threshold == 0
         || policy.signer_threshold > policy.signer_count
-        || policy.cancellation_threshold == 0
-        || policy.cancellation_threshold > policy.signer_count
         || policy.guardian_threshold == 0
         || policy.guardian_threshold > policy.guardian_count
     {
@@ -65,6 +65,13 @@ pub fn create_setup(
 
     let config_id = random_id();
     let config_version = 1;
+    let owner_cancel_signing_seed = SecretVec::new(random_id().to_vec());
+    let owner_cancel_public_key = verifying_key_bytes(&signing_key(
+        owner_cancel_signing_seed
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid owner cancellation seed"))?,
+    ));
     let authorization_key = SecretVec::new(random_id().to_vec());
     let dek = SecretVec::new(random_id().to_vec());
     let a_shares = split_secret(
@@ -93,11 +100,9 @@ pub fn create_setup(
                 config_version,
                 signer_set_commitment: [0; 32],
                 signer_threshold: policy.signer_threshold,
-                cancellation_threshold: policy.cancellation_threshold,
             },
             seen_requests: Default::default(),
             seen_nonces: Default::default(),
-            cancelled_requests: Default::default(),
         });
     }
     let (signer_root, signer_proofs) = merkle_commit(&signer_leaves)?;
@@ -187,7 +192,7 @@ pub fn create_setup(
                     signer_set_commitment: signer_root,
                     signer_count: policy.signer_count,
                     signer_threshold: policy.signer_threshold,
-                    cancellation_threshold: policy.cancellation_threshold,
+                    owner_cancel_public_key,
                     minimum_recovery_delay: policy.minimum_recovery_delay,
                     guardian_material_root: guardian_root,
                 },
@@ -196,7 +201,7 @@ pub fn create_setup(
     }
 
     let descriptor = RecoveryDescriptor {
-        guardians: routes,
+        guardians: routes.clone(),
         guardian_material_root: guardian_root,
         data_shards: policy.guardian_threshold,
         total_shards: policy.guardian_count,
@@ -227,11 +232,11 @@ pub fn create_setup(
         config_version,
         signer_count: policy.signer_count,
         signer_threshold: policy.signer_threshold,
-        cancellation_threshold: policy.cancellation_threshold,
         guardian_count: policy.guardian_count,
         guardian_threshold: policy.guardian_threshold,
         minimum_recovery_delay: policy.minimum_recovery_delay,
         signer_set_commitment: signer_root,
+        owner_cancel_public_key,
         guardian_material_commitment: guardian_root,
         encrypted_recovery_descriptor,
         max_request_lifetime: 7 * 24 * 60 * 60,
@@ -246,12 +251,15 @@ pub fn create_setup(
         capsule_locator: locator,
         signer_mailboxes,
         signer_set_commitment: signer_root,
+        owner_cancel_public_key,
     };
     Ok(SetupBundle {
         capsule,
         card,
         signers,
         guardians,
+        owner_cancel_signing_seed,
+        owner_guardian_routes: routes,
     })
 }
 
@@ -260,6 +268,7 @@ pub fn validate_capsule(card: &RecoveryCard, capsule: &ConfigCapsule) -> Result<
         || capsule.crypto_suite != CryptoSuite::default()
         || capsule.config_id != card.config_id
         || capsule.signer_set_commitment != card.signer_set_commitment
+        || capsule.owner_cancel_public_key != card.owner_cancel_public_key
         || capsule.signer_count == 0
         || capsule.signer_threshold == 0
         || capsule.signer_threshold > capsule.signer_count
@@ -440,8 +449,12 @@ pub fn validate_release_for_policy(
     request: &RecoveryRequest,
     now: u64,
 ) -> Result<()> {
-    if request.config_id != policy.config_id
+    if request.protocol_version != PROTOCOL_VERSION
+        || request.crypto_suite != CryptoSuite::default()
+        || request.config_id != policy.config_id
         || request.config_version != policy.config_version
+        || request.recovery_recipient_key.len() != gp_crypto::XWING_PUBLIC_KEY_LEN
+        || request.requested_at > now
         || request.expiry <= now
     {
         bail!("release request is stale or expired");
@@ -479,47 +492,89 @@ pub fn validate_release_for_policy(
     Ok(())
 }
 
-pub fn validate_cancel_for_policy(
-    certificate: &CancelCertificate,
+pub fn make_owner_cancel_certificate(
+    request: &RecoveryRequest,
+    owner_cancel_signing_seed: Id32,
+    cancel_response_recipient_key: Vec<u8>,
+    reason_code: u16,
+    issued_at: u64,
+) -> Result<OwnerCancelCertificate> {
+    let owner_key = signing_key(owner_cancel_signing_seed);
+    let mut certificate = OwnerCancelCertificate {
+        protocol_version: PROTOCOL_VERSION,
+        config_id: request.config_id,
+        config_version: request.config_version,
+        request_id: request.request_id,
+        request_digest: request_digest(request)?,
+        recovery_recipient_key: request.recovery_recipient_key.clone(),
+        cancel_response_recipient_key,
+        reason_code,
+        nonce: request.nonce,
+        issued_at,
+        owner_cancel_public_key: verifying_key_bytes(&owner_key),
+        owner_signature: vec![],
+    };
+    certificate.owner_signature = sign(&owner_key, &gp_wire::owner_cancel(&certificate)?);
+    Ok(certificate)
+}
+
+pub fn validate_owner_cancel_for_policy(
+    certificate: &OwnerCancelCertificate,
     policy: &GuardianPolicy,
     request: &RecoveryRequest,
     now: u64,
 ) -> Result<()> {
-    if request.config_id != policy.config_id
+    if request.protocol_version != PROTOCOL_VERSION
+        || request.crypto_suite != CryptoSuite::default()
+        || request.config_id != policy.config_id
         || request.config_version != policy.config_version
+        || request.recovery_recipient_key.len() != gp_crypto::XWING_PUBLIC_KEY_LEN
+        || request.requested_at > now
         || request.expiry <= now
+        || certificate.protocol_version != PROTOCOL_VERSION
+        || certificate.config_id != request.config_id
+        || certificate.config_version != request.config_version
+        || certificate.request_id != request.request_id
+        || certificate.request_digest != request_digest(request)?
+        || certificate.recovery_recipient_key != request.recovery_recipient_key
+        || certificate.cancel_response_recipient_key.len() != gp_crypto::XWING_PUBLIC_KEY_LEN
+        || certificate.nonce != request.nonce
+        || certificate.issued_at < request.requested_at
+        || certificate.issued_at > now
+        || certificate.issued_at >= request.expiry
+        || certificate.owner_cancel_public_key != policy.owner_cancel_public_key
     {
-        bail!("cancellation request is stale or expired");
+        bail!("owner hard-cancel is stale, malformed, or not bound to the exact request");
     }
-    let digest = sha256(&gp_wire::request_digest_preimage(request)?);
-    let mut ids = BTreeSet::new();
-    for vote in &certificate.votes {
-        if vote.protocol_version != PROTOCOL_VERSION
-            || vote.config_id != request.config_id
-            || vote.config_version != request.config_version
-            || vote.request_id != request.request_id
-            || vote.request_digest != digest
-            || vote.nonce != request.nonce
-            || !ids.insert(vote.signer_id)
-        {
-            bail!("cancel vote is not bound to the exact request");
-        }
-        validate_membership(
-            vote.signer_id,
-            &vote.signer_public_key,
-            &vote.signer_membership_proof,
-            policy.signer_set_commitment,
-            policy.signer_count,
-        )?;
-        verify(
-            &vote.signer_public_key,
-            &gp_wire::cancel_vote(vote)?,
-            &vote.signer_signature,
-        )?;
+    verify(
+        &policy.owner_cancel_public_key,
+        &gp_wire::owner_cancel(certificate)?,
+        &certificate.owner_signature,
+    )?;
+    Ok(())
+}
+
+pub fn validate_owner_cancel_ack(
+    ack: &OwnerCancelAck,
+    certificate: &OwnerCancelCertificate,
+    request: &RecoveryRequest,
+    route: &GuardianRoute,
+) -> Result<()> {
+    if ack.protocol_version != PROTOCOL_VERSION
+        || ack.config_id != request.config_id
+        || ack.config_version != request.config_version
+        || ack.request_id != request.request_id
+        || ack.request_digest != request_digest(request)?
+        || ack.owner_cancel_transcript_digest != sha256(&gp_wire::owner_cancel(certificate)?)
+        || ack.guardian_index != route.guardian_index
+    {
+        bail!("owner hard-cancel acknowledgement is not bound to the exact request");
     }
-    if ids.len() < usize::from(policy.cancellation_threshold) {
-        bail!("cancellation threshold not reached");
-    }
+    verify(
+        &route.guardian_public_key,
+        &gp_wire::owner_cancel_ack(ack)?,
+        &ack.guardian_signature,
+    )?;
     Ok(())
 }
 
@@ -632,7 +687,6 @@ mod tests {
             &SetupPolicy {
                 signer_count: 3,
                 signer_threshold: 2,
-                cancellation_threshold: 2,
                 guardian_count: 5,
                 guardian_threshold: 3,
                 minimum_recovery_delay: 5,
@@ -653,6 +707,7 @@ mod tests {
         let bundle = bundle();
         let card_json = serde_json::to_string(&bundle.card).unwrap();
         assert!(!card_json.contains("guardian"));
+        assert!(!card_json.contains("signing_seed"));
         assert_eq!(bundle.card.signer_mailboxes.len(), 3);
         assert_eq!(bundle.guardians.len(), 5);
         assert!(
@@ -661,6 +716,9 @@ mod tests {
                 .iter()
                 .all(|guardian| guardian.record.policy.signer_count == 3)
         );
+        assert!(bundle.guardians.iter().all(|guardian| {
+            guardian.record.policy.owner_cancel_public_key == bundle.capsule.owner_cancel_public_key
+        }));
     }
 
     #[test]
@@ -674,5 +732,72 @@ mod tests {
                     .any(|window| window == b"network-only plaintext marker")
             );
         }
+    }
+
+    #[test]
+    fn only_pinned_owner_key_can_hard_cancel_exact_request() {
+        let bundle = bundle();
+        let recipient = RecipientKeyPair::from_seed([42; 32]);
+        let request = RecoveryRequest {
+            protocol_version: PROTOCOL_VERSION,
+            crypto_suite: bundle.capsule.crypto_suite,
+            config_id: bundle.capsule.config_id,
+            config_version: bundle.capsule.config_version,
+            request_id: [7; 32],
+            recovery_recipient_key: recipient.public_key().to_vec(),
+            requested_at: 10,
+            nonce: [8; 32],
+            expiry: 100,
+        };
+        let owner_seed: Id32 = bundle
+            .owner_cancel_signing_seed
+            .as_slice()
+            .try_into()
+            .unwrap();
+        let certificate = make_owner_cancel_certificate(
+            &request,
+            owner_seed,
+            RecipientKeyPair::from_seed([43; 32]).public_key().to_vec(),
+            1,
+            11,
+        )
+        .unwrap();
+        let policy = &bundle.guardians[0].record.policy;
+        validate_owner_cancel_for_policy(&certificate, policy, &request, 11).unwrap();
+
+        let route = &bundle.owner_guardian_routes[0];
+        let mut ack = OwnerCancelAck {
+            protocol_version: PROTOCOL_VERSION,
+            config_id: request.config_id,
+            config_version: request.config_version,
+            request_id: request.request_id,
+            request_digest: request_digest(&request).unwrap(),
+            owner_cancel_transcript_digest: sha256(&gp_wire::owner_cancel(&certificate).unwrap()),
+            guardian_index: route.guardian_index,
+            guardian_signature: vec![],
+        };
+        ack.guardian_signature = sign(
+            &signing_key(bundle.guardians[0].signing_seed),
+            &gp_wire::owner_cancel_ack(&ack).unwrap(),
+        );
+        validate_owner_cancel_ack(&ack, &certificate, &request, route).unwrap();
+        ack.guardian_index += 1;
+        assert!(validate_owner_cancel_ack(&ack, &certificate, &request, route).is_err());
+
+        let wrong_key = make_owner_cancel_certificate(
+            &request,
+            [99; 32],
+            RecipientKeyPair::from_seed([44; 32]).public_key().to_vec(),
+            1,
+            11,
+        )
+        .unwrap();
+        assert!(validate_owner_cancel_for_policy(&wrong_key, policy, &request, 11).is_err());
+
+        let mut changed_request = request;
+        changed_request.recovery_recipient_key[0] ^= 1;
+        assert!(
+            validate_owner_cancel_for_policy(&certificate, policy, &changed_request, 11).is_err()
+        );
     }
 }
