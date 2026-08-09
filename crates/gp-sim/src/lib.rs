@@ -167,7 +167,7 @@ impl DemoOptions {
         }
         if self.simulated_delay_secs > 300 {
             return Err(SimError::InvalidOptions(
-                "compressed delay must be 300 seconds or less".into(),
+                "compressed simulator delay must be 300 seconds or less".into(),
             ));
         }
         if self.cover_rate > 100 {

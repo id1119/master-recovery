@@ -95,14 +95,15 @@ mod tests {
             "offlineSigner",
             "offlineGuardian",
             "corruptGuardian",
+            "recoveryOutcome",
             "delaySeconds",
+            "replaySeed",
+            "metadataMode",
             "latencyMs",
             "packetLoss",
             "packetDuplication",
             "mixDrop",
             "coverRate",
-            "replaySeed",
-            "metadataMode",
             "fileInput",
             "compareButton",
             "copyCardButton",
@@ -110,16 +111,22 @@ mod tests {
             "networkSignerValue",
             "networkGuardianValue",
             "requestBindingFact",
+            "graphBackup",
+            "graphRecovery",
+            "observedMetric",
+            "packetChart",
+            "comparisonPanel",
         ] {
             assert!(
                 INDEX_HTML.contains(required),
                 "missing UI control {required}"
             );
         }
-        assert!(INDEX_HTML.contains("not a production anonymity network"));
-        assert!(INDEX_HTML.contains("Ed25519 is classical"));
         assert!(INDEX_HTML.contains("method: 'POST'"));
         assert!(!INDEX_HTML.contains("/api/demo?"));
+        assert!(INDEX_HTML.contains("not a production anonymity network"));
+        assert!(INDEX_HTML.contains("Ed25519 is classical/non-PQ"));
+        assert!(!INDEX_HTML.contains("cancelThreshold"));
     }
 
     #[test]
