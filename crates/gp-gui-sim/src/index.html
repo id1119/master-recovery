@@ -195,7 +195,7 @@
     .graph-head b { font-size: 12px; }
     .graph-head span { color: #92a39b; font: 9px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
     .graph-wrap { padding: 8px 12px; overflow-x: auto; }
-    #networkGraph { display: block; width: 100%; min-width: 620px; height: auto; }
+    #graphBackup, #graphRecovery { display: block; width: 100%; min-width: 620px; height: auto; }
     .gnode rect { fill: #1d2c27; stroke: #ffffff1c; stroke-width: 1; }
     .gnode.required rect { stroke: #73b99b5c; }
     .gnode.bad rect { stroke: #c65c4880; fill: #26211f; }
@@ -205,7 +205,17 @@
     .gnode.bad .gsub { fill: #d99183; }
     .gedge { stroke: #ffffff12; stroke-width: 1; }
     .gdot { fill: #a9d3c2; }
-    .graph-foot { display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 0 18px 14px; color: #92a39b; font-size: 9px; }
+    .gdot.frag { fill: #a9d3c2; }
+    .gdot.auth { fill: #e3c489; }
+    .gdot.capsule { fill: #8fb5dd; }
+    .gnode.idle rect { opacity: .3; }
+    .gnode.idle .gname, .gnode.idle .gsub { opacity: .4; }
+    .graph-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; padding: 0 18px 14px; color: #92a39b; font-size: 9px; }
+    .graph-key { display: inline-flex; align-items: center; gap: 6px; }
+    .graph-key::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #92a39b; }
+    .graph-key.frag::before { background: #a9d3c2; }
+    .graph-key.auth::before { background: #e3c489; }
+    .graph-key.capsule::before { background: #8fb5dd; }
 
     .result-grid { display: grid; grid-template-columns: 1.25fr .75fr; gap: 12px; margin-top: 12px; }
     .result-box { padding: 18px; }
@@ -355,6 +365,12 @@
         <div class="ready-notes"><div class="ready-note"><b>1. Store the card</b><span>Cloud drive, password manager, paper, or another device.</span></div><div class="ready-note"><b>2. Keep it private</b><span>Not a secret, but it exposes stable recovery routing data.</span></div><div class="ready-note"><b>3. Test now</b><span>Prove the selected thresholds and failure scenario end to end.</span></div></div>
         <div class="ready-actions"><button class="secondary" id="startOverButton" type="button">Create another</button><button class="primary" id="startRecoveryButton" type="button">Test recovery</button></div>
       </div>
+
+      <section class="card graph-card">
+        <div class="graph-head"><b>Backup distribution</b><span id="graphCaptionBackup">Waiting for observer trace…</span></div>
+        <div class="graph-wrap"><svg id="graphBackup" role="img" aria-label="Simulated packet flow distributing the backup"></svg></div>
+        <div class="graph-foot"><span class="graph-key frag">Ciphertext fragments + wrapped DEK shares</span><span class="graph-key auth">Authorization shares</span><span class="graph-key capsule">Config capsule</span><span>Protocol view; the observer cannot tell these streams apart.</span></div>
+      </section>
     </section>
 
     <section class="view" id="resultSection">
@@ -367,9 +383,9 @@
       </section>
 
       <section class="card graph-card">
-        <div class="graph-head"><b>Packet flow</b><span id="graphCaption">Waiting for observer trace…</span></div>
-        <div class="graph-wrap"><svg id="networkGraph" role="img" aria-label="Simulated packet flow across the recovery network"></svg></div>
-        <div class="graph-foot"><span>Dots are observer-visible packets; real and cover cells are indistinguishable.</span><span>Mix hops come from the trace; endpoint attachment is a visual assignment.</span></div>
+        <div class="graph-head"><b>Recovery flow</b><span id="graphCaptionRecovery">Waiting for observer trace…</span></div>
+        <div class="graph-wrap"><svg id="graphRecovery" role="img" aria-label="Simulated packet flow reconstructing the secret"></svg></div>
+        <div class="graph-foot"><span class="graph-key frag">Guardian contributions</span><span class="graph-key auth">Signer approvals + A shares</span><span class="graph-key capsule">Capsule fetch</span><span>Protocol view; the observer cannot tell these streams apart.</span></div>
       </section>
 
       <div class="result-grid">
@@ -398,7 +414,7 @@
     };
     const numberValue = id => Number(byId(id).value);
 
-    function showView(id) { for (const view of document.querySelectorAll('.view')) view.classList.toggle('active', view.id === id); byId('navBackup').classList.toggle('active', id === 'backupView'); byId('navRecovery').classList.toggle('active', id !== 'backupView'); if (id === 'resultSection') startGraphAnimation(); else stopGraphAnimation(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+    function showView(id) { for (const view of document.querySelectorAll('.view')) view.classList.toggle('active', view.id === id); byId('navBackup').classList.toggle('active', id === 'backupView'); byId('navRecovery').classList.toggle('active', id !== 'backupView'); if (id === 'readyView' || id === 'resultSection') startGraphAnimation(); else stopGraphAnimation(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
     function makeOption(label, value) { const option = document.createElement('option'); option.textContent = label; option.value = String(value); return option; }
     function fillActorSelect(id, count, preferred, noun) { const select = byId(id), previous = preferred ?? Number(select.value || 0); select.replaceChildren(makeOption('None', 0)); for (let i = 1; i <= count; i++) select.appendChild(makeOption(`${noun} ${i}`, i)); select.value = String(previous <= count ? previous : 0); }
     function syncActorControls(preferred = {}) { const s = Math.max(1, numberValue('signerCount')), g = Math.max(1, numberValue('guardianCount')); byId('signerThreshold').max = s; byId('signerThreshold').value = Math.min(numberValue('signerThreshold'), s); byId('cancelThreshold').max = s; byId('cancelThreshold').value = Math.min(numberValue('cancelThreshold'), s); byId('guardianThreshold').max = g; byId('guardianThreshold').value = Math.min(numberValue('guardianThreshold'), g); fillActorSelect('offlineSigner', s, preferred.offlineSigner, 'Signer'); fillActorSelect('offlineGuardian', g, preferred.offlineGuardian, 'Guardian'); fillActorSelect('corruptGuardian', g, preferred.corruptGuardian, 'Guardian'); renderPlanSummary(); }
@@ -410,7 +426,7 @@
     async function requestDemo(options) { const response = await fetch('/api/demo', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(options), cache: 'no-store' }); const body = await response.json().catch(() => null); if (body?.Error) throw new Error(body.Error.message); if (!response.ok) throw new Error(`Local simulator returned HTTP ${response.status}.`); if (!body?.Snapshot) throw new Error('Unexpected simulator response.'); return body.Snapshot.result; }
 
     async function createBackup() { if (validateOptions().length) return; stopPlayback(); const button = byId('runButton'); button.disabled = true; button.textContent = 'Creating…'; try { latestResult = await requestDemo(collectOptions()); eventCursor = -1; byId('validationError').classList.remove('show'); byId('comparisonPanel').classList.remove('show'); byId('navRecovery').disabled = false; renderReady(); showView('readyView'); } catch (error) { showError(error.message); } finally { button.disabled = false; button.textContent = 'Create backup'; } }
-    function renderReady() { const fingerprint = latestResult.config_id_hex; byId('recoveryFingerprint').textContent = `gp:${fingerprint.slice(0, 16)}…${fingerprint.slice(-12)} · v1`; byId('cardStatus').textContent = ''; const qr = byId('recoveryCardVisual'); qr.replaceChildren(); for (let i = 0; i < 81; i++) { const cell = document.createElement('i'); const nibble = parseInt(fingerprint[i % fingerprint.length], 16); if (((nibble >> (i % 4)) & 1) || (i < 3) || (i > 69 && i % 2 === 0)) cell.className = 'on'; qr.appendChild(cell); } }
+    function renderReady() { const fingerprint = latestResult.config_id_hex; byId('recoveryFingerprint').textContent = `gp:${fingerprint.slice(0, 16)}…${fingerprint.slice(-12)} · v1`; byId('cardStatus').textContent = ''; const qr = byId('recoveryCardVisual'); qr.replaceChildren(); for (let i = 0; i < 81; i++) { const cell = document.createElement('i'); const nibble = parseInt(fingerprint[i % fingerprint.length], 16); if (((nibble >> (i % 4)) & 1) || (i < 3) || (i > 69 && i % 2 === 0)) cell.className = 'on'; qr.appendChild(cell); } renderGraph('backup', 0); }
     async function copyCardLocator() { if (!latestResult) return; const value = latestResult.recovery_card.capsule_locator; try { await navigator.clipboard.writeText(value); byId('cardStatus').textContent = 'Copied'; } catch { const field = document.createElement('textarea'); field.value = value; field.style.position = 'fixed'; field.style.opacity = '0'; document.body.appendChild(field); field.select(); document.execCommand('copy'); field.remove(); byId('cardStatus').textContent = 'Copied'; } }
     function downloadRecoveryCard() { if (!latestResult) return; const payload = { format: 'guardian-recovery-card-v1', protocol_version: 1, ...latestResult.recovery_card }; const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob), anchor = document.createElement('a'); anchor.href = url; anchor.download = `guardian-recovery-${latestResult.config_id_hex.slice(0, 12)}.json`; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); byId('cardStatus').textContent = 'Downloaded'; }
     function resetBackup() { stopPlayback(); latestResult = null; eventCursor = -1; byId('navRecovery').disabled = true; byId('comparisonPanel').classList.remove('show'); showView('backupView'); byId('secretInput').focus(); }
@@ -422,50 +438,57 @@
     function moveEvent(delta) { if (!latestResult) return; stopPlayback(); eventCursor = Math.max(0, Math.min(latestResult.events.length - 1, eventCursor + delta)); renderResult(); }
     function phaseStep(phase) { return ({ SETUP: 0, RECOVERY: 1, DELAY: 2, RELEASE: 3, CANCEL: 3, COMPLETE: 4, ROTATE: 5 })[phase] ?? 0; }
 
-    function renderResult() { const event = latestResult.events[eventCursor], stepIndex = phaseStep(event.phase), info = phaseInfo[event.phase] || [event.actor, event.message]; document.querySelectorAll('.step').forEach(step => { const n = Number(step.dataset.step); step.classList.toggle('done', n < stepIndex); step.classList.toggle('current', n === stepIndex); }); byId('eventPhase').textContent = event.phase; byId('eventTitle').textContent = info[0]; byId('eventMessage').textContent = event.message; byId('cryptoMessage').textContent = info[1]; byId('eventCounter').textContent = `${eventCursor + 1} / ${latestResult.events.length}`; byId('requestBindingFact').textContent = `Recipient pinned · ${latestResult.request_id_hex.slice(0, 10)}…`; byId('approvalFact').textContent = `${latestResult.signer_threshold} of ${numberValue('signerCount')} signers · ${String(latestResult.mode).toUpperCase()}`; byId('guardianFact').textContent = latestResult.cancelled ? 'Release blocked · no shares' : `${latestResult.valid_guardians} valid · ${latestResult.rejected_guardians.length} rejected`; const state = [...latestResult.events.slice(0, eventCursor + 1)].reverse().find(item => item.state)?.state || 'Created', final = eventCursor === latestResult.events.length - 1; byId('statePill').textContent = state; byId('statePill').className = `state${final && latestResult.success ? ' success' : final && latestResult.cancelled ? ' cancelled' : ''}`; byId('resultTitle').textContent = final && latestResult.success ? 'Recovery completed' : final && latestResult.cancelled ? 'Recovery cancelled' : 'Recovery test'; byId('resultSubtitle').textContent = final && latestResult.success ? `${latestResult.valid_guardians} valid guardian responses reconstructed the secret.` : final && latestResult.cancelled ? 'Honest guardians refused release; no plaintext was reconstructed.' : `Verified event ${eventCursor + 1} of ${latestResult.events.length}.`; renderOutput(stepIndex); renderParticipants(); renderObserver(); renderArtifacts(stepIndex); renderLog(); renderGraph(stepIndex); }
+    function renderResult() { const event = latestResult.events[eventCursor], stepIndex = phaseStep(event.phase), info = phaseInfo[event.phase] || [event.actor, event.message]; document.querySelectorAll('.step').forEach(step => { const n = Number(step.dataset.step); step.classList.toggle('done', n < stepIndex); step.classList.toggle('current', n === stepIndex); }); byId('eventPhase').textContent = event.phase; byId('eventTitle').textContent = info[0]; byId('eventMessage').textContent = event.message; byId('cryptoMessage').textContent = info[1]; byId('eventCounter').textContent = `${eventCursor + 1} / ${latestResult.events.length}`; byId('requestBindingFact').textContent = `Recipient pinned · ${latestResult.request_id_hex.slice(0, 10)}…`; byId('approvalFact').textContent = `${latestResult.signer_threshold} of ${numberValue('signerCount')} signers · ${String(latestResult.mode).toUpperCase()}`; byId('guardianFact').textContent = latestResult.cancelled ? 'Release blocked · no shares' : `${latestResult.valid_guardians} valid · ${latestResult.rejected_guardians.length} rejected`; const state = [...latestResult.events.slice(0, eventCursor + 1)].reverse().find(item => item.state)?.state || 'Created', final = eventCursor === latestResult.events.length - 1; byId('statePill').textContent = state; byId('statePill').className = `state${final && latestResult.success ? ' success' : final && latestResult.cancelled ? ' cancelled' : ''}`; byId('resultTitle').textContent = final && latestResult.success ? 'Recovery completed' : final && latestResult.cancelled ? 'Recovery cancelled' : 'Recovery test'; byId('resultSubtitle').textContent = final && latestResult.success ? `${latestResult.valid_guardians} valid guardian responses reconstructed the secret.` : final && latestResult.cancelled ? 'Honest guardians refused release; no plaintext was reconstructed.' : `Verified event ${eventCursor + 1} of ${latestResult.events.length}.`; renderOutput(stepIndex); renderParticipants(); renderObserver(); renderArtifacts(stepIndex); renderLog(); renderGraph('recovery', stepIndex); }
     function renderOutput(step) { const output = byId('recoveredOutput'), download = byId('downloadButton'); download.style.display = 'none'; download.onclick = null; if (!latestResult.success || step < 4) { output.textContent = latestResult.cancelled && eventCursor === latestResult.events.length - 1 ? 'Cancelled — no plaintext reconstructed.' : 'Waiting for reconstruction…'; return; } const secret = latestResult.recovered_secret || ''; if (!secret.startsWith('GPFILE1:')) { output.textContent = secret; return; } try { const file = JSON.parse(secret.slice(8)); output.textContent = `Recovered file: ${file.name}`; download.style.display = 'inline'; download.textContent = `Download ${file.name}`; download.onclick = () => { const raw = atob(file.data), bytes = Uint8Array.from(raw, c => c.charCodeAt(0)), url = URL.createObjectURL(new Blob([bytes], { type: file.type || 'application/octet-stream' })), anchor = document.createElement('a'); anchor.href = url; anchor.download = file.name; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000); }; } catch { output.textContent = 'Recovered file wrapper could not be decoded.'; } }
     function renderParticipants() { const grid = byId('participantGrid'); grid.replaceChildren(); const os = numberValue('offlineSigner'), rejected = latestResult?.rejected_guardians || []; const signer = document.createElement('div'); signer.className = 'participant good'; signer.textContent = `${latestResult?.signer_threshold || numberValue('signerThreshold')} signer approvals verified`; grid.appendChild(signer); if (os) { const node = document.createElement('div'); node.className = 'participant offline'; node.textContent = `Signer ${os} unavailable`; grid.appendChild(node); } if (rejected.length) for (const id of rejected) { const node = document.createElement('div'); node.className = 'participant bad'; node.textContent = `Guardian ${id} rejected / missing`; grid.appendChild(node); } else { const node = document.createElement('div'); node.className = 'participant good'; node.textContent = 'Guardian responses valid'; grid.appendChild(node); } }
     function renderObserver() { if (!latestResult) return; const o = latestResult.observer; byId('observedMetric').textContent = o.total_observed_packets; byId('coverMetric').textContent = o.cover_packets; byId('droppedMetric').textContent = o.dropped_packets; byId('duplicatedMetric').textContent = o.duplicated_packets; byId('bucketMetric').textContent = o.packets[0] ? `${o.packets[0].size_bucket}B` : '—'; byId('leakageText').textContent = o.remaining_leakage; const chart = byId('packetChart'); chart.replaceChildren(); if (!o.packets.length) { chart.textContent = 'All simulated packets were dropped.'; return; } for (const packet of o.packets.slice(0, 120)) { const bar = document.createElement('i'); bar.className = 'packet'; bar.style.height = `${10 + packet.timestamp_ms % 53}px`; bar.title = `t=${packet.timestamp_ms}ms · ${packet.size_bucket}B · ${packet.previous_hop} → ${packet.next_hop}`; chart.appendChild(bar); } }
     function renderArtifacts(step) { const id = latestResult.config_id_hex; byId('cardArtifact').textContent = `Config locator ${id.slice(0, 12)}… plus opaque signer handles; no guardian roster.`; byId('configArtifact').textContent = `Config ${id.slice(0, 16)}… · version ${latestResult.rotated_config_version && step >= 5 ? 2 : 1}.`; byId('descriptorArtifact').textContent = step >= 1 ? 'Decrypted only on this recovery client after reconstructing A.' : 'Guardian roster remains sealed under A.'; }
     function renderLog() { const log = byId('eventLog'); log.replaceChildren(); for (const event of latestResult.events.slice(0, eventCursor + 1)) { const row = document.createElement('div'); row.className = 'log-row'; const name = document.createElement('b'); name.textContent = `${event.phase} · ${event.actor}`; const message = document.createElement('span'); message.textContent = event.message; row.append(name, message); log.appendChild(row); } }
 
-    const GRAPH_NS = 'http://www.w3.org/2000/svg', GRAPH_PERIOD = 7000, GRAPH_TRAVEL = 1150, GRAPH_MAX_DOTS = 150;
-    let graphModel = null, graphFrame = null, graphSignature = '';
+    const GRAPH_NS = 'http://www.w3.org/2000/svg', GRAPH_PERIOD = 7000, GRAPH_TRAVEL = 1150, GRAPH_MAX_DOTS = 150, CONFIG_STORES = 3;
+    const graphs = { backup: null, recovery: null };
+    let graphFrame = null;
 
     function svgEl(name, attrs) { const node = document.createElementNS(GRAPH_NS, name); for (const key in attrs) node.setAttribute(key, attrs[key]); return node; }
     function hashText(text) { let hash = 2166136261; for (let i = 0; i < text.length; i++) { hash ^= text.charCodeAt(i); hash = Math.imul(hash, 16777619); } return hash >>> 0; }
     function guardianStatus(index, step) { if (numberValue('offlineGuardian') === index) return 'Offline'; if ((latestResult.rejected_guardians || []).includes(index)) return step >= 3 ? 'Rejected' : 'Holding'; if (latestResult.cancelled && step >= 3) return 'Release blocked'; if (step >= 4) return 'Released'; if (step >= 3) return 'Releasable'; if (step >= 2) return 'Delay pending'; return 'Holding'; }
     function signerStatus(index, step) { return numberValue('offlineSigner') === index ? 'Offline' : step >= 1 ? 'Approved' : 'Idle'; }
+    function graphLeg(tag) { const roll = hashText(`${tag}#leg`) % 10; return roll < 6 ? 'frag' : roll < 9 ? 'auth' : 'capsule'; }
 
-    function buildGraph() {
-      const svg = byId('networkGraph');
+    function buildGraph(view) {
+      const svg = byId(view === 'backup' ? 'graphBackup' : 'graphRecovery');
       svg.replaceChildren();
-      graphModel = null;
+      graphs[view] = null;
       const signerCount = numberValue('signerCount'), guardianCount = numberValue('guardianCount');
       const allPackets = latestResult.observer.packets || [];
       const mixNames = [...new Set(allPackets.flatMap(packet => [packet.previous_hop, packet.next_hop]).filter(hop => hop.startsWith('mix-')))].sort((a, b) => Number(a.slice(4)) - Number(b.slice(4)));
       const mixes = mixNames.length ? mixNames : ['mix-1'];
       const width = 1200, rowGap = 58;
-      const height = Math.max(400, Math.max(signerCount + 2, guardianCount, mixes.length) * rowGap + 90);
+      const height = Math.max(430, Math.max(signerCount, guardianCount, mixes.length, CONFIG_STORES + 3) * rowGap + 100);
       svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
       svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
 
-      const column = (count, cx, kind, label) => { const gap = Math.min(rowGap, (height - 90) / Math.max(count, 1)); return Array.from({ length: count }, (_, i) => ({ id: `${kind}-${i + 1}`, index: i + 1, kind, cx, cy: height / 2 + (i - (count - 1) / 2) * gap, label: `${label} ${i + 1}` })); };
+      const column = (count, cx, kind, label, centre = height / 2) => { const gap = Math.min(rowGap, (height - 90) / Math.max(count, 1)); return Array.from({ length: count }, (_, i) => ({ id: `${kind}-${i + 1}`, index: i + 1, kind, cx, cy: centre + (i - (count - 1) / 2) * gap, label: `${label} ${i + 1}` })); };
       const signers = column(signerCount, 330, 'signer', 'Signer');
       const guardians = column(guardianCount, 890, 'guardian', 'Guardian');
+      const configs = column(CONFIG_STORES, 100, 'config', 'Config store', height / 2 + 120);
       const mixGap = Math.min(rowGap * 2.2, (height - 100) / Math.max(mixes.length, 1));
       const mixNodes = mixes.map((name, i) => ({ id: name, index: i, kind: 'mix', cx: 610, cy: height / 2 + (i - (mixes.length - 1) / 2) * mixGap, label: `Mix ${name.slice(4)}` }));
-      const owner = { id: 'owner', index: 0, kind: 'owner', cx: 100, cy: height / 2 - 70, label: 'Owner' };
-      const config = { id: 'config', index: 0, kind: 'config', cx: 100, cy: height / 2 + 130, label: 'Config store' };
+      const owner = { id: 'owner', index: 0, kind: 'owner', cx: 100, cy: height / 2 - 130, label: 'Owner' };
       const recovery = { id: 'recovery', index: 0, kind: 'recovery', cx: 1100, cy: height / 2, label: 'Recovery device' };
-      const nodes = [owner, config, ...signers, ...mixNodes, ...guardians, recovery];
+      const nodes = [owner, ...configs, ...signers, ...mixNodes, ...guardians, recovery];
       const byNodeId = new Map(nodes.map(node => [node.id, node]));
 
-      const sources = [owner.id, config.id, ...signers.map(node => node.id)];
+      const endpoints = { frag: guardians, auth: signers, capsule: configs };
+      const thin = (group, mix, node) => group.length <= 12 || hashText(mix.id + node.id) % 3 === 0;
       const edges = [];
-      for (const source of sources) for (const mix of mixNodes) edges.push([source, mix.id]);
-      for (const mix of mixNodes) for (const guardian of guardians) if (guardians.length <= 12 || hashText(mix.id + guardian.id) % 3 === 0) edges.push([mix.id, guardian.id]);
-      for (const guardian of guardians) edges.push([guardian.id, recovery.id]);
+      if (view === 'backup') {
+        for (const mix of mixNodes) edges.push([owner.id, mix.id]);
+        for (const group of Object.values(endpoints)) for (const node of group) for (const mix of mixNodes) if (thin(group, mix, node)) edges.push([mix.id, node.id]);
+      } else {
+        for (const group of Object.values(endpoints)) for (const node of group) for (const mix of mixNodes) if (thin(group, mix, node)) edges.push([node.id, mix.id]);
+        for (const mix of mixNodes) edges.push([mix.id, recovery.id]);
+      }
 
       const edgeLayer = svgEl('g', {}), dotLayer = svgEl('g', {}), nodeLayer = svgEl('g', {});
       for (const [from, to] of edges) { const a = byNodeId.get(from), b = byNodeId.get(to); if (a && b) edgeLayer.appendChild(svgEl('line', { class: 'gedge', x1: a.cx, y1: a.cy, x2: b.cx, y2: b.cy })); }
@@ -484,23 +507,26 @@
       const stamps = packets.map(packet => packet.timestamp_ms);
       const earliest = stamps.length ? Math.min(...stamps) : 0, span = Math.max(1, (stamps.length ? Math.max(...stamps) : 1) - earliest);
       for (const packet of packets) {
-        const tag = packet.mailbox_tag || `${packet.timestamp_ms}`;
-        const fromId = packet.previous_hop === 'opaque-client' ? sources[hashText(tag) % sources.length] : packet.previous_hop;
-        const toId = packet.next_hop === 'opaque-mailbox' ? guardians[hashText(`${tag}#g`) % guardians.length].id : packet.next_hop;
+        const tag = packet.mailbox_tag || `${packet.timestamp_ms}`, leg = graphLeg(tag);
+        const group = endpoints[leg], endpoint = group[hashText(`${tag}#${leg}`) % group.length].id;
+        const origin = view === 'backup' ? owner.id : endpoint, terminus = view === 'backup' ? endpoint : recovery.id;
+        const fromId = packet.previous_hop === 'opaque-client' ? origin : packet.previous_hop;
+        const toId = packet.next_hop === 'opaque-mailbox' ? terminus : packet.next_hop;
         const from = byNodeId.get(fromId), to = byNodeId.get(toId);
         if (!from || !to) continue;
-        const circle = svgEl('circle', { class: 'gdot', r: 3, cx: from.cx, cy: from.cy, opacity: 0 });
+        const circle = svgEl('circle', { class: `gdot ${leg}`, r: 3.2, cx: from.cx, cy: from.cy, opacity: 0 });
         dotLayer.appendChild(circle);
         dots.push({ circle, from, to, start: ((packet.timestamp_ms - earliest) / span) * (GRAPH_PERIOD - GRAPH_TRAVEL) });
       }
       svg.append(edgeLayer, dotLayer, nodeLayer);
-      graphModel = { nodes, dots };
+      graphs[view] = { svg, nodes, dots, signature: graphSignature() };
     }
 
     function stepGraph(now) {
-      if (!graphModel) { graphFrame = null; return; }
+      const active = Object.values(graphs).filter(model => model && model.svg.closest('.view').classList.contains('active'));
+      if (!active.length) { graphFrame = null; return; }
       const elapsed = now % GRAPH_PERIOD;
-      for (const dot of graphModel.dots) {
+      for (const model of active) for (const dot of model.dots) {
         const progress = (elapsed - dot.start) / GRAPH_TRAVEL;
         if (progress < 0 || progress > 1) { dot.circle.setAttribute('opacity', '0'); continue; }
         dot.circle.setAttribute('cx', dot.from.cx + (dot.to.cx - dot.from.cx) * progress);
@@ -509,28 +535,37 @@
       }
       graphFrame = requestAnimationFrame(stepGraph);
     }
-    function startGraphAnimation() { if (!graphFrame && graphModel) graphFrame = requestAnimationFrame(stepGraph); }
+    function startGraphAnimation() { if (!graphFrame) graphFrame = requestAnimationFrame(stepGraph); }
     function stopGraphAnimation() { if (graphFrame) cancelAnimationFrame(graphFrame); graphFrame = null; }
+    function graphSignature() { return `${numberValue('signerCount')}|${numberValue('guardianCount')}|${latestResult.request_id_hex}|${latestResult.observer.packets.length}`; }
 
-    function renderGraph(step) {
+    function renderGraph(view, step) {
       if (!latestResult) return;
-      const signature = `${numberValue('signerCount')}|${numberValue('guardianCount')}|${latestResult.request_id_hex}|${latestResult.observer.packets.length}`;
-      if (signature !== graphSignature) { graphSignature = signature; buildGraph(); startGraphAnimation(); }
-      if (!graphModel) return;
+      if (!graphs[view] || graphs[view].signature !== graphSignature()) buildGraph(view);
+      const model = graphs[view];
+      if (!model) return;
       const state = [...latestResult.events.slice(0, eventCursor + 1)].reverse().find(item => item.state)?.state || 'Created';
-      for (const node of graphModel.nodes) {
+      for (const node of model.nodes) {
         let sub = '', flag = '';
-        if (node.kind === 'guardian') { sub = guardianStatus(node.index, step); flag = sub === 'Offline' ? 'offline' : sub === 'Rejected' ? 'bad' : node.index <= latestResult.guardian_threshold ? 'required' : ''; }
+        if (view === 'backup') {
+          if (node.kind === 'guardian') { sub = 'Fragment + wrapped share'; flag = node.index <= latestResult.guardian_threshold ? 'required' : ''; }
+          else if (node.kind === 'signer') { sub = 'Authorization share'; flag = 'required'; }
+          else if (node.kind === 'config') sub = 'Capsule replica';
+          else if (node.kind === 'mix') sub = `${String(latestResult.mode).toUpperCase()} hop`;
+          else if (node.kind === 'owner') { sub = 'Encrypted locally'; flag = 'required'; }
+          else { sub = 'Not yet involved'; flag = 'idle'; }
+        } else if (node.kind === 'guardian') { sub = guardianStatus(node.index, step); flag = sub === 'Offline' ? 'offline' : sub === 'Rejected' ? 'bad' : node.index <= latestResult.guardian_threshold ? 'required' : ''; }
         else if (node.kind === 'signer') { sub = signerStatus(node.index, step); flag = sub === 'Offline' ? 'offline' : 'required'; }
+        else if (node.kind === 'config') sub = 'Capsule fetched';
         else if (node.kind === 'mix') sub = `${String(latestResult.mode).toUpperCase()} hop`;
         else if (node.kind === 'recovery') { sub = state; flag = latestResult.cancelled && step >= 3 ? 'bad' : step >= 4 ? 'required' : ''; }
-        else if (node.kind === 'owner') sub = 'Encrypted locally';
-        else sub = 'Pseudonymous capsule';
+        else { sub = 'Handed off after setup'; flag = 'idle'; }
         node.subText.textContent = sub;
         node.group.setAttribute('class', `gnode ${node.kind}${flag ? ` ${flag}` : ''}`);
       }
       const observer = latestResult.observer;
-      byId('graphCaption').textContent = `${observer.total_observed_packets} observed · ${observer.cover_packets} cover · ${graphModel.dots.length} animated · ${String(latestResult.mode).toUpperCase()}`;
+      byId(view === 'backup' ? 'graphCaptionBackup' : 'graphCaptionRecovery').textContent = `${observer.total_observed_packets} observed · ${observer.cover_packets} cover · ${model.dots.length} animated · ${String(latestResult.mode).toUpperCase()}`;
+      startGraphAnimation();
     }
 
     async function compareModes() { if (validateOptions().length) return; const button = byId('compareButton'); button.disabled = true; button.textContent = 'Comparing…'; try { const results = await Promise.all(['off', 'basic', 'strong'].map(mode => requestDemo({ ...collectOptions(mode), cancel_before_release: false }))); const grid = byId('comparisonGrid'); grid.replaceChildren(); for (const result of results) { const card = document.createElement('div'); card.className = 'compare-mode'; const mode = document.createElement('b'); mode.textContent = result.mode.toUpperCase(); const total = document.createElement('strong'); total.textContent = `${result.observer.total_observed_packets} packets`; const detail = document.createElement('p'); detail.textContent = `${result.observer.cover_packets} cover · fixed format: ${result.observer.fixed_outer_format ? 'yes' : 'no'}`; card.append(mode, total, detail); grid.appendChild(card); } latestResult = results.find(result => result.mode === 'strong') || results[2]; eventCursor = latestResult.events.length - 1; byId('navRecovery').disabled = false; byId('comparisonPanel').classList.add('show'); showView('resultSection'); renderResult(); byId('comparisonPanel').closest('details').open = true; } catch (error) { showError(error.message); } finally { button.disabled = false; button.textContent = 'Compare OFF / BASIC / STRONG'; } }
