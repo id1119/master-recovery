@@ -1,4 +1,4 @@
-# Guardian Protocol
+# Master Recovery
 
 A working hackathon prototype of metadata-resistant, post-quantum-skewed,
 decentralized secret recovery.
