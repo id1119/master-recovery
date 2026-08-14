@@ -57,6 +57,11 @@ Network setup also writes `demo-data/owner-control.json` with mode `0600`.
 That private per-config artifact is the only cancellation authority. It is
 separate from the non-confidential Recovery Card and must not be published.
 
+The owner-side offline format for backing up this material (owner-control +
+Recovery Card, sealed, error-corrected, verifiable) is designed in
+[`ENVELOPE_SPEC.md`](ENVELOPE_SPEC.md). It is a design draft, not implemented;
+it extends, never changes, the protocol below.
+
 Owner hard cancellation is protocol v2. Node state files are namespaced by
 protocol version, so existing v1 Docker volumes are left intact but ignored.
 Run `make network-demo` once to provision a fresh v2 Recovery Card and private

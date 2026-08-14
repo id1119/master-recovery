@@ -13,10 +13,11 @@ Do not redesign the protocol while implementing it. If you find a contradiction,
 1. `MASTER_PROMPT.md`
 2. `PROTOCOL.md`
 3. `SECURITY.md`
-4. `METADATA_RESISTANCE.md`
-5. `ARCHITECTURE.md`
-6. `DEMO.md`
-7. `README.md`
+4. `ENVELOPE_SPEC.md` (owner-side artifact format — design draft, not implemented; protocol wins on any conflict)
+5. `METADATA_RESISTANCE.md`
+6. `ARCHITECTURE.md`
+7. `DEMO.md`
+8. `README.md`
 
 If two files disagree, follow the higher file in this list and fix the lower file rather than inventing a third behavior.
 
