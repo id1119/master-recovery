@@ -183,7 +183,7 @@ def _is_probable_prime(n):
 def make_safe_prime(bits):
     """Generate a safe prime p (p, (p-1)/2 both prime), q = (p-1)/2."""
     while True:
-        q = secrets.getrandbits(bits - 1)
+        q = secrets.randbits(bits - 1)
         q |= (1 << (bits - 2)) | 1
         if _is_probable_prime(q):
             p = 2 * q + 1
@@ -191,17 +191,53 @@ def make_safe_prime(bits):
                 return p, q
 
 
-def default_field(with_subgroup=True):
-    """The built-in GF for the merged scheme (512-bit safe prime).
+H_SEED = b"sssx unified pedersen h seed v3"
 
-    h is derived deterministically as g^c with c = SHA-256 of a public seed;
-    log_g h is unknown unless SHA-256 preimages are feasible.  The seed is
-    public so any party can recompute h, but the discrete log is
-    computationally hidden.
+
+def hash_to_subgroup(p, q, seed, domain=b"sssx-h2g-v1"):
+    """Derive a subgroup element from a public seed with NO known discrete log.
+
+    For a safe prime p = 2q+1 the quadratic residues are exactly the order-q
+    subgroup, so squaring a hash output lands in the subgroup.  The point of
+    this function is what it does *not* do: it never computes g^c for a
+    derivable c.  Deriving h as g^{H(seed)} publishes log_g h, which destroys
+    Pedersen binding, because anyone can recompute the exponent from the same
+    public seed and then open any commitment to any value.  Hashing into the
+    group instead leaves log_g h unknown to everyone, including whoever chose
+    the seed.
+    """
+    need = (p.bit_length() + 128 + 7) // 8
+    counter = 0
+    while True:
+        buf = b""
+        block = 0
+        while len(buf) < need:
+            buf += hashlib.sha256(
+                domain + seed + counter.to_bytes(4, "big")
+                + block.to_bytes(4, "big")).digest()
+            block += 1
+        candidate = int.from_bytes(buf[:need], "big") % p
+        counter += 1
+        if candidate <= 1:
+            continue
+        h = pow(candidate, 2, p)          # square into the order-q subgroup
+        if h in (0, 1, p - 1):
+            continue
+        if pow(h, q, p) != 1:
+            continue
+        return h
+
+
+def default_field(with_subgroup=True):
+    """The built-in GF for the unified scheme.
+
+    h is derived by hashing a public seed *into* the subgroup, so log_g h is
+    unknown to every party including the author of the seed.  Anyone can
+    recompute h from the seed and check it, which is the nothing-up-my-sleeve
+    property; nobody can recover its discrete log without solving DLP.
     """
     if with_subgroup:
-        c = int.from_bytes(hashlib.sha256(b"sssx merged pedersen h seed v1").digest(), "big") % DEFAULT_SUBGROUP_Q
-        h = pow(DEFAULT_GENERATOR, c, DEFAULT_SAFE_PRIME)
+        h = hash_to_subgroup(DEFAULT_SAFE_PRIME, DEFAULT_SUBGROUP_Q, H_SEED)
         return GF(DEFAULT_SAFE_PRIME, q=DEFAULT_SUBGROUP_Q,
                   g=DEFAULT_GENERATOR, h=h)
     return GF(DEFAULT_SAFE_PRIME)

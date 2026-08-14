@@ -458,7 +458,7 @@ def test_unified_public_verification():
     assert not unified.verify_share((x, s, r + 1), tr, f)
     assert not unified.verify_share((x + 5, s, r), tr, f)
     bad = dict(tr)
-    bad['digest'] = tr['digest'] + 1
+    bad['commitments'] = [(tr['commitments'][0] * 2) % f.p]         + list(tr['commitments'][1:])
     assert not unified.verify_transcript(bad, f)
 
 
@@ -479,7 +479,7 @@ def test_unified_cross_session_detected():
     shares_b, keys_b, tr_b = unified.deal(888, 2, 5, f, _rand)
     raises(ValueError, lambda: unified.combine(tr_a, shares_b[:3], field=f))
     bad_tr = dict(tr_a)
-    bad_tr['digest'] = tr_a['digest'] + 1
+    bad_tr['commitments'] = list(tr_a['commitments'][:-1])         + [tr_b['commitments'][-1]]
     raises(ValueError, lambda: unified.combine(bad_tr, shares_a[:3], field=f))
 
 
@@ -729,7 +729,8 @@ def test_unified_seal_tamper_detection():
     raises(ValueError, unified.unseal, bundle, [other_blob] + blobs[1:],
            field=f)
     bad_bundle = dict(bundle)
-    bad_bundle['digest'] = hex(int(bundle['digest'], 16) + 1)
+    bad_bundle['commitments'] = [hex((int(bundle['commitments'][0], 16) * 2)
+                                     % f.p)] + list(bundle['commitments'][1:])
     raises(ValueError, unified.unseal, bad_bundle, blobs[:3], field=f)
 
 

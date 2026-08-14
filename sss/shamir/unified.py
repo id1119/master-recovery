@@ -21,12 +21,12 @@ independent improvements to plain Shamir (1979) secret sharing:
 * McEliece & Sarwate (CACM 1981): reconstruction decodes the s-values with
   Berlekamp-Welch when not every share passes verification, correcting
   residual corruption instead of only detecting it.
-* SLIP-0039-style digest point: the polynomial is extended to x = 254 and
-  (P(254), R(254)) is published, publicly checkable against the commitments
-  via g^{P(254)} h^{R(254)} == prod_j C_j^{254^j}; wrong-secret
-  reconstruction (e.g. mixed sessions) is rejected at combine time.
+* Reconstruction screen: the recovered polynomial is checked coefficient by
+  coefficient against the commitments (g^{a_j} h^{b_j} == C_j), so a wrong
+  secret or a cross-session mix is rejected at combine time.  No evaluation
+  of the secret polynomial is ever published.
 * Herzberg, Jarecki, Krawczyk & Yung (CRYPTO 1995): shares refresh in place
-  with zero-constant Pedersen deltas, updated commitments and digest, no
+  with zero-constant Pedersen deltas and updated commitments, no
   dealer and no change to the secret.
 * Desmedt & Jarecki (CRYPTO 1993): the sharing redistributes to a new
   (t', n') parameter set with new commitments derived in the exponent.
@@ -41,7 +41,7 @@ independent improvements to plain Shamir (1979) secret sharing:
   submitted shares are corrupted, using the commitments and, if keys are
   supplied, the pairwise MACs.
 * Session discipline from shamir.format: every transcript carries a random
-  16-byte session id; cross-session mixing is rejected via the digest.
+  16-byte session id; cross-session mixing is rejected by the screen.
 * Ben-Or, Goldwasser & Wigderson (STOC 1988): Shamir sharing is linear --
   addition gates are free.  Holder i sums the counterpart shares of several
   deals locally (add_shares / mul_share / linear_shares) and the transcript
@@ -88,8 +88,8 @@ independent improvements to plain Shamir (1979) secret sharing:
   in the pipeline changes.
 * Pedersen (CRYPTO 1991) / GJKR-style dealer-free setup: distributed_run is
   DKG for the unified scheme -- every party deals a random unified
-  polynomial, posts commitments + per-coefficient PoKs + its digest point
-  (P_i(254), R_i(254)); verified shares and digest points sum over QUAL; no
+  polynomial and posts commitments + per-coefficient PoKs; verified
+  shares and commitments sum over QUAL; no
   party ever sees the group secret, and the emergent transcript is a plain
   unified transcript that feeds the entire pipeline unchanged.
 
@@ -114,7 +114,7 @@ import secrets
 from . import core, robust
 from .format import session_id
 
-_SCHEME = "unified-v2"
+_SCHEME = "unified-v3"
 _DIGEST_INDEX = 254  # same digest point as shamir.format.DIGEST_POINT_X
 _POK_DOMAIN = b"sssx unified pok v1"
 _COEFF_POK_DOMAIN = b"sssx unified coeff-pok v1"
@@ -190,14 +190,12 @@ def _monomial(points, field):
     return poly
 
 
-def _challenge_pok(session, n, threshold, commitments, digest, blinder, t_val,
-                   cf):
+def _challenge_pok(session, n, threshold, commitments, t_val, cf):
     w = _group_width(cf)
     data = bytearray(_POK_DOMAIN + session)
     data += n.to_bytes(2, "big") + threshold.to_bytes(2, "big")
     for c in commitments:
         data += c.to_bytes(w, "big")
-    data += digest.to_bytes(w, "big") + blinder.to_bytes(w, "big")
     data += t_val.to_bytes(w, "big")
     return int.from_bytes(hashlib.sha256(bytes(data)).digest(), "big") % cf.q
 
@@ -263,14 +261,11 @@ def _deal(coefficients, threshold, n, field=None, randfunc=None):
         raise ValueError("could not draw polynomials with all-nonzero shares")
 
     commitments = [f.commit_double(a, b) for a, b in zip(s_poly, r_poly)]
-    digest = qf.polynomial_eval(s_poly, _DIGEST_INDEX)
-    digest_blinder = qf.polynomial_eval(r_poly, _DIGEST_INDEX)
 
     ua, ub = _draw(), _draw()
     t_val = f.commit_double(ua, ub)
     session = session_id()
-    ch = _challenge_pok(session, n, threshold, commitments, digest,
-                        digest_blinder, t_val, f)
+    ch = _challenge_pok(session, n, threshold, commitments, t_val, f)
     proof = {
         "T": t_val,
         "challenge": ch,
@@ -297,8 +292,6 @@ def _deal(coefficients, threshold, n, field=None, randfunc=None):
         "n": n,
         "secrets": nsecrets,
         "commitments": commitments,
-        "digest": digest,
-        "digest_blinder": digest_blinder,
         "proof": proof,
         "mac_tags": tags,
     }
@@ -311,7 +304,7 @@ def deal(secret, threshold, n, field=None, randfunc=None):
     Returns (shares, mac_keys, transcript): shares are [(x, s_i, r_i)] with
     P(0) == secret; mac_keys are the dealer-epoch Rabin-Ben-Or keys (the
     corresponding tags are public in transcript['mac_tags']); transcript is
-    the publicly checkable deal (commitments, digest point, PoK, session).
+    the publicly checkable deal (commitments, PoK, session).
     """
     return _deal([secret], threshold, n, field, randfunc)
 
@@ -383,7 +376,7 @@ def distributed_run(n, threshold, field=None, randfunc=None, corrupt=(),
     Returns a dict with keys: shares ({recipient_index: (s, r)}), transcript,
     public_key (g^group-secret, exponent-recovered from the transcript),
     qual, commitments_all ({dealer: commitments}), poks, complaints,
-    pok_failures, posted254 ({dealer: (P_i(254), R_i(254))}).
+    pok_failures.
     """
     f = _commit_field(field)
     qf = _arith(field)
@@ -403,13 +396,11 @@ def distributed_run(n, threshold, field=None, randfunc=None, corrupt=(),
                        zip(s_poly, r_poly)]
         pok = {"entries": _coeff_pok_entries(s_poly, r_poly, dealer_session,
                                              _draw, f, qf)}
-        posted = (qf.polynomial_eval(s_poly, _DIGEST_INDEX),
-                  qf.polynomial_eval(r_poly, _DIGEST_INDEX))
-        deals[dealer] = (s_poly, r_poly, commitments, pok, posted)
+        deals[dealer] = (s_poly, r_poly, commitments, pok)
 
     recipients = {r: {} for r in range(1, n + 1)}
     complaints = []
-    for dealer, (s_poly, r_poly, commitments, _pok, _posted) in deals.items():
+    for dealer, (s_poly, r_poly, commitments, _pok) in deals.items():
         for recipient in range(1, n + 1):
             s = qf.polynomial_eval(s_poly, recipient)
             r = qf.polynomial_eval(r_poly, recipient)
@@ -422,7 +413,7 @@ def distributed_run(n, threshold, field=None, randfunc=None, corrupt=(),
                 complaints.append((dealer, recipient))
 
     pok_failures = []
-    for dealer, (_sp, _rp, commitments, pok, _posted) in deals.items():
+    for dealer, (_sp, _rp, commitments, pok) in deals.items():
         if not _pok_entries_ok(pok["entries"], commitments,
                                session + bytes([dealer]), threshold, f):
             pok_failures.append(dealer)
@@ -433,15 +424,11 @@ def distributed_run(n, threshold, field=None, randfunc=None, corrupt=(),
     shares = {}
     acc_s = [0] * (threshold + 1)
     acc_r = [0] * (threshold + 1)
-    digest = 0
-    blinder = 0
     for dealer in qual:
-        s_poly, r_poly, commitments, _pok, posted = deals[dealer]
+        s_poly, r_poly, commitments, _pok = deals[dealer]
         for j in range(threshold + 1):
             acc_s[j] = qf.add(acc_s[j], s_poly[j])
             acc_r[j] = qf.add(acc_r[j], r_poly[j])
-        digest = qf.add(digest, posted[0])
-        blinder = qf.add(blinder, posted[1])
     for recipient in range(1, n + 1):
         s = 0
         r = 0
@@ -459,8 +446,6 @@ def distributed_run(n, threshold, field=None, randfunc=None, corrupt=(),
         "n": n,
         "secrets": 1,
         "commitments": commitments,
-        "digest": digest,
-        "digest_blinder": blinder,
         "proof": None,
         "mac_tags": {},
     }
@@ -475,7 +460,6 @@ def distributed_run(n, threshold, field=None, randfunc=None, corrupt=(),
         "poks": {d: deals[d][3] for d in deals},
         "complaints": complaints,
         "pok_failures": pok_failures,
-        "posted254": {d: deals[d][4] for d in deals},
     }
 
 
@@ -537,13 +521,6 @@ def verify_transcript(transcript, field=None):
             return False
         for c in commitments:
             f._check_subgroup(c)
-        digest = transcript["digest"]
-        blinder = transcript["digest_blinder"]
-        if not (0 <= digest < qf.p and 0 <= blinder < qf.p):
-            return False
-        if f.commit_double(digest, blinder) != f.eval_commit(commitments,
-                                                             _DIGEST_INDEX):
-            return False
         proof = transcript["proof"]
         if proof is not None:
             session = transcript["session"]
@@ -559,7 +536,7 @@ def verify_transcript(transcript, field=None):
                 except ValueError:
                     return False
                 ch = _challenge_pok(session, n, threshold,
-                                    commitments, digest, blinder, proof["T"], f)
+                                    commitments, proof["T"], f)
                 if proof["challenge"] != ch:
                     return False
                 if f.commit_double(proof["za"], proof["zb"]) != \
@@ -695,6 +672,39 @@ def _acceptance_set(shares, mac_keys, tags, min_votes, qf):
     return [sh for sh in shares if sh[0] in alive]
 
 
+def _screen_against_commitments(coeffs, shares, transcript, f, qf):
+    """Confirm the reconstructed polynomial really is the committed one.
+
+    This replaces the old published digest point.  Publishing (P(254),
+    R(254)) as plaintext handed every observer a free extra evaluation of the
+    secret polynomial, so t colluding holders plus the public transcript
+    reached t+1 points and interpolated the secret: the privacy threshold was
+    one lower than advertised.  The commitments already pin the polynomial,
+    so instead we rebuild the blinding polynomial from shares that agree with
+    the candidate and check every commitment directly.  That is strictly
+    stronger than a one-point screen (it checks all t+1 coefficients rather
+    than a single evaluation) and it publishes nothing.
+    """
+    threshold = transcript["threshold"]
+    commitments = transcript["commitments"]
+    agree = [(x, sv, rv) for (x, sv, rv) in shares
+             if qf.polynomial_eval(coeffs, x) == sv
+             and verify_share((x, sv, rv), transcript, f)]
+    if len(agree) < threshold + 1:
+        raise ValueError("reconstruction is not backed by threshold + 1"
+                         " commitment-verified shares (wrong secret or"
+                         " cross-session mixing)")
+    r_coeffs = _monomial([(x, rv) for x, _sv, rv in agree[:threshold + 1]], qf)
+    for j, cj in enumerate(commitments):
+        a = coeffs[j] if j < len(coeffs) else 0
+        b = r_coeffs[j] if j < len(r_coeffs) else 0
+        if f.commit_double(a, b) != cj:
+            raise ValueError("reconstructed polynomial does not match the"
+                             " commitments (wrong secret or cross-session"
+                             " mixing)")
+    return True
+
+
 def _recover(transcript, shares, mac_keys, field):
     """Reconstruct the share polynomial coefficient list, with the full
     filtering pipeline; raises ValueError on unrecoverable input."""
@@ -727,9 +737,7 @@ def _recover(transcript, shares, mac_keys, field):
     if coeffs is None:
         coeffs = robust.berlekamp_welch(
             [(x, s) for x, s, _ in shares], threshold, qf)
-    if qf.polynomial_eval(coeffs, _DIGEST_INDEX) != transcript["digest"]:
-        raise ValueError("digest mismatch (wrong secret or cross-session"
-                         " mixing)")
+    _screen_against_commitments(coeffs, shares, transcript, f, qf)
     return coeffs
 
 
@@ -859,12 +867,6 @@ def linear_transcript(transcripts, coeffs=None, field=None):
             if j < len(tr["commitments"]):
                 acc = (acc * pow(tr["commitments"][j], c % f.q, f.p)) % f.p
         commitments.append(acc)
-    digest = 0
-    blinder = 0
-    for tr, c in zip(transcripts, coeffs):
-        cc = c % qf.p
-        digest = qf.add(digest, qf.mul(tr["digest"], cc))
-        blinder = qf.add(blinder, qf.mul(tr["digest_blinder"], cc))
     return {
         "scheme": _SCHEME,
         "session": session_id(),
@@ -872,8 +874,6 @@ def linear_transcript(transcripts, coeffs=None, field=None):
         "n": n,
         "secrets": 1,
         "commitments": commitments,
-        "digest": digest,
-        "digest_blinder": blinder,
         "proof": None,
         "mac_tags": {},
     }
@@ -949,7 +949,6 @@ def mul_shares(shares_a, shares_b, transcript_a, transcript_b, field=None,
     comms[0] = (comms[0] * pow(f.g, de, f.p)) % f.p
     product_tr = dict(base)
     product_tr["commitments"] = comms
-    product_tr["digest"] = qf.add(base["digest"], de)
 
     lin = linear_shares([d, e, 1], [sh_b, sh_a, shares_c], f)
     product_shares = [(x, qf.add(s, de), r) for x, s, r in lin]
@@ -1389,7 +1388,7 @@ def refresh(share, transcript, field=None, randfunc=None, corrupt=()):
                       unchanged), updated digest point, mac_tags cleared and
                       proof dropped (dealer-epoch layers).
     * info:          {received: [(dealer, d_s, d_r)], commitments_i:
-                      {dealer: [C_1..C_t]}, posted254: {dealer:
+                      {dealer: [C_1..C_t]}
                       (delta_s(254), delta_r(254))}}.
 
     `corrupt` is a set of dealer indices dealing a nonzero-constant delta
@@ -1411,7 +1410,6 @@ def refresh(share, transcript, field=None, randfunc=None, corrupt=()):
         return rand() % qf.p
 
     commitments_i = {}
-    posted254 = {}
     received = []
     new_s, new_r = s, r
     for dealer in range(1, n + 1):
@@ -1423,8 +1421,6 @@ def refresh(share, transcript, field=None, randfunc=None, corrupt=()):
             m_poly = [0] + [_draw() for _ in range(threshold)]
         comm = [f.commit_double(a, b) for a, b in zip(c_poly[1:], m_poly[1:])]
         commitments_i[dealer] = comm
-        posted254[dealer] = (qf.polynomial_eval(c_poly, _DIGEST_INDEX),
-                             qf.polynomial_eval(m_poly, _DIGEST_INDEX))
         d = qf.polynomial_eval(c_poly, x)
         m = qf.polynomial_eval(m_poly, x)
         received.append((dealer, d, m))
@@ -1444,17 +1440,9 @@ def refresh(share, transcript, field=None, randfunc=None, corrupt=()):
             acc = (acc * comm[j - 1]) % f.p
         new_commitments.append(acc)
     new_transcript["commitments"] = new_commitments
-    digest = transcript["digest"]
-    blinder = transcript["digest_blinder"]
-    for ds, dr in posted254.values():
-        digest = qf.add(digest, ds)
-        blinder = qf.add(blinder, dr)
-    new_transcript["digest"] = digest
-    new_transcript["digest_blinder"] = blinder
     new_transcript["mac_tags"] = {}
     new_transcript["proof"] = None
-    info = {"received": received, "commitments_i": commitments_i,
-            "posted254": posted254}
+    info = {"received": received, "commitments_i": commitments_i}
     return (x, new_s, new_r), new_transcript, info
 
 
@@ -1527,22 +1515,11 @@ def redistribute(shares, transcript, new_threshold, new_n, field=None,
             acc = (acc * pow(cs[j], lam, f.p)) % f.p
         new_commitments.append(acc)
 
-    digest = 0
-    blinder = 0
     posted = {}
-    for (x, _s, _r), lam, (h_poly, m_poly) in zip(holders, lambdas, dealt):
-        h254 = qf.polynomial_eval(h_poly, _DIGEST_INDEX)
-        m254 = qf.polynomial_eval(m_poly, _DIGEST_INDEX)
-        posted[x] = (h254, m254)
-        digest = qf.add(digest, qf.mul(h254, lam))
-        blinder = qf.add(blinder, qf.mul(m254, lam))
-
     new_transcript = dict(transcript)
     new_transcript["threshold"] = new_threshold
     new_transcript["n"] = new_n
     new_transcript["commitments"] = new_commitments
-    new_transcript["digest"] = digest
-    new_transcript["digest_blinder"] = blinder
     new_transcript["mac_tags"] = {}
     new_transcript["proof"] = None
     return new_shares, new_transcript, posted
@@ -1644,8 +1621,6 @@ def _bundle_from(transcript, shares, width, field=None):
         "n": transcript["n"],
         "secrets": transcript["secrets"],
         "commitments": [hex(c) for c in transcript["commitments"]],
-        "digest": hex(transcript["digest"]),
-        "digest_blinder": hex(transcript["digest_blinder"]),
         "proof": _proof_to_bundle(proof) if proof else None,
         "mac_tags": {("%d,%d" % (i, j)): hex(v)
                      for (i, j), v in transcript["mac_tags"].items()},
@@ -1666,8 +1641,6 @@ def _transcript_from_bundle(bundle):
         "n": bundle["n"],
         "secrets": bundle["secrets"],
         "commitments": [int(c, 16) for c in bundle["commitments"]],
-        "digest": int(bundle["digest"], 16),
-        "digest_blinder": int(bundle["digest_blinder"], 16),
         "proof": _proof_from_bundle(bundle["proof"]) if bundle.get("proof")
         else None,
         "mac_tags": {tuple(int(p) for p in k.split(",")): int(v, 16)
