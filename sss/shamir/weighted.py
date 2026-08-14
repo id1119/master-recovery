@@ -43,7 +43,7 @@ def weighted_share(secret, weights, quota, field=None, randfunc=None):
     return out
 
 
-def weighted_combine(subshare_groups, quota):
+def weighted_combine(subshare_groups, quota, field=None):
     """Reconstruct the secret from weighted sub-shares (needs >= quota distinct points).
 
     subshare_groups is the dict {participant: [(x, y), ...]} returned by
@@ -61,4 +61,4 @@ def weighted_combine(subshare_groups, quota):
     if len(points) < quota:
         raise ValueError("need at least %d distinct sub-shares to reconstruct"
                          % quota)
-    return interpolate_at(list(points.items()), 0)
+    return interpolate_at(list(points.items()), 0, field)

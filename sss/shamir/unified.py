@@ -121,6 +121,9 @@ _COEFF_POK_DOMAIN = b"sssx unified coeff-pok v1"
 _SHARE_POK_DOMAIN = b"sssx unified share-pok v1"
 _KEY_DOMAIN = b"sssx unified key v1"
 _AEAD_DOMAIN = b"sssx unified aead v1"
+_AUDIT_DOMAIN = b"sssx unified audit-possession v1"
+BATCH_WEIGHT_BITS = 128
+AUDIT_NONCE_LEN = 32
 _NONCE_LEN = 16
 _TAG_LEN = 32
 _KEY_LEN = 32
@@ -642,6 +645,146 @@ def verify_share_proof(proof, transcript, field=None):
         return False
 
 
+# --------------------------------------------------------------------------
+# Auditor layer: sampled proof of possession, fresh per challenge
+# --------------------------------------------------------------------------
+
+def audit_challenge(transcript, x, epoch=0, randfunc=None):
+    """Auditor side: mint a single-use challenge for the holder of slot x.
+
+    `prove_share` is replayable by construction: its Fiat-Shamir challenge
+    binds only (session, x, T), so one proof answers every future audit and
+    anyone who observed it can replay it.  An auditor asking "do you hold
+    this share *now*" needs freshness, so the possession proof binds an
+    auditor-chosen nonce and an epoch as well.
+    """
+    if not (1 <= x <= 253):
+        raise ValueError("share index must be in 1..253")
+    if not (0 <= epoch < (1 << 64)):
+        raise ValueError("epoch out of range")
+    nonce = (_rand_bytes(randfunc, AUDIT_NONCE_LEN) if randfunc is not None
+             else secrets.token_bytes(AUDIT_NONCE_LEN))
+    return {"session": transcript["session"], "x": x, "epoch": epoch,
+            "nonce": nonce}
+
+
+def _challenge_possession(transcript, challenge, t_val, cf):
+    w = _group_width(cf)
+    data = bytearray(_AUDIT_DOMAIN + transcript["session"])
+    data += challenge["x"].to_bytes(2, "big")
+    data += challenge["epoch"].to_bytes(8, "big")
+    data += bytes(challenge["nonce"])
+    data += t_val.to_bytes(w, "big")
+    return int.from_bytes(hashlib.sha256(bytes(data)).digest(), "big") % cf.q
+
+
+def _challenge_wellformed(transcript, challenge, x=None):
+    try:
+        if challenge["session"] != transcript["session"]:
+            return False
+        if not isinstance(challenge["nonce"], (bytes, bytearray)):
+            return False
+        if len(challenge["nonce"]) < AUDIT_NONCE_LEN:
+            return False
+        if not (1 <= challenge["x"] <= 253):
+            return False
+        if not (0 <= challenge["epoch"] < (1 << 64)):
+            return False
+        return x is None or challenge["x"] == x
+    except (KeyError, TypeError):
+        return False
+
+
+def prove_possession(share, transcript, challenge, field=None, randfunc=None):
+    """Holder side: prove possession of a valid share against a fresh
+    challenge, revealing nothing about (s, r).
+
+    Same Schnorr proof of the Pedersen opening as `prove_share`, but the
+    challenge hash also binds the auditor's nonce and epoch, so a proof is
+    evidence of possession *at the time of that challenge* and cannot be
+    replayed against a later one.  The auditor needs no secret material and
+    learns only that slot x is held correctly.
+    """
+    f = _commit_field(field)
+    qf = _arith(field)
+    if not verify_transcript(transcript, f):
+        raise ValueError("transcript failed public verification")
+    x, s, r = share
+    if not _challenge_wellformed(transcript, challenge, x):
+        raise ValueError("challenge does not match this transcript and slot")
+    if not (0 <= s < qf.p and 0 <= r < qf.p):
+        raise ValueError("share outside Z_q")
+    if not verify_share(share, transcript, f):
+        raise ValueError("share does not match the transcript")
+    rand = randfunc if randfunc is not None else (lambda: secrets.randbelow(qf.p))
+    ua, ub = rand() % qf.p, rand() % qf.p
+    t_val = f.commit_double(ua, ub)
+    c_val = _challenge_possession(transcript, challenge, t_val, f)
+    return {"x": x, "epoch": challenge["epoch"], "T": t_val, "c": c_val,
+            "za": (ua + c_val * s) % qf.p,
+            "zb": (ub + c_val * r) % qf.p}
+
+
+def verify_possession(proof, transcript, challenge, field=None):
+    """Auditor side: check a possession proof against its own challenge.
+
+    Returns bool and never raises.  A proof minted for a different nonce,
+    epoch, slot or session fails, which is what makes a stored proof useless
+    for answering the next audit.
+    """
+    f = _commit_field(field)
+    qf = _arith(field)
+    try:
+        if not verify_transcript(transcript, f):
+            return False
+        x = proof["x"]
+        if not _challenge_wellformed(transcript, challenge, x):
+            return False
+        if proof["epoch"] != challenge["epoch"]:
+            return False
+        t_val = proof["T"]
+        f._check_subgroup(t_val)
+        c_val = _challenge_possession(transcript, challenge, t_val, f)
+        if c_val != proof["c"]:
+            return False
+        za, zb = proof["za"], proof["zb"]
+        if not (0 <= za < qf.p and 0 <= zb < qf.p):
+            return False
+        cx = f.eval_commit(transcript["commitments"], x)
+        return f.commit_double(za, zb) == (t_val * pow(cx, c_val, f.p)) % f.p
+    except (ValueError, TypeError, KeyError):
+        return False
+
+
+def audit_holders(transcript, challenges, responses, field=None):
+    """Auditor side: verdict per slot for one sampling round.
+
+    `challenges` maps x -> challenge, `responses` maps x -> proof or None.
+    Returns {x: verdict} with verdicts drawn from:
+
+    * "held"     -- valid proof against this round's challenge;
+    * "invalid"  -- a response was given and it does not verify: objective,
+                    attributable cryptographic fault;
+    * "missing"  -- no response: operational evidence only, since the network
+                    may be at fault, so callers must not treat it as proof of
+                    loss.
+
+    The auditor holds no key material and no share, so a full round teaches
+    it only which slots answered correctly.
+    """
+    f = _commit_field(field)
+    verdicts = {}
+    for x, challenge in challenges.items():
+        proof = responses.get(x)
+        if proof is None:
+            verdicts[x] = "missing"
+        elif verify_possession(proof, transcript, challenge, f):
+            verdicts[x] = "held"
+        else:
+            verdicts[x] = "invalid"
+    return verdicts
+
+
 def _mac_ok(x, s, j, mac_keys, tags, qf):
     a, b = mac_keys.get((x, j), (None, None))
     if a is None:
@@ -1128,17 +1271,26 @@ def verify_signature(message, r_val, z, y_val, field=None):
         return False
 
 
-def batch_verify(shares, transcript, field=None):
+def batch_verify(shares, transcript, field=None, randfunc=None):
     """Aggregate Pedersen verification (Bellare-Garay-Rabin 1998 style).
 
     Checks every share against the commitments with one multi-exponentiation
-    instead of n evaluations: g^{sum s_i} h^{sum r_i} == prod_j
-    C_j^{sum_i x_i^j}.  Also enforces structure, index range and field range
-    per share.  Returns bool.  Sound up to the discrete-log assumption that
-    log_g h is unknown -- a forged compensating share would need g^ds h^dr ==
-    1 with a nontrivial (ds, dr), which is exactly that DLP.  Use for cheap
-    bulk acceptance (e.g. a database of holdings); use verify_share when a
-    single corrupt share must be pinpointed.
+    instead of n evaluations, using the BGR *small exponents test*: draw a
+    fresh secret weight d_i per share and check
+
+        g^{sum d_i s_i} h^{sum d_i r_i} == prod_j C_j^{sum_i d_i x_i^j}.
+
+    The weights are load-bearing.  Summing the shares unweighted turns this
+    into a checksum: an adversary adds delta to one share's s and subtracts
+    delta from another, both errors cancel in the sum, and the batch passes
+    with two corrupt shares.  With fresh random d_i the forged errors must
+    satisfy sum d_i (ds_i, dr_i) = 0 for weights the adversary cannot
+    predict, which happens with probability about 2^-BATCH_WEIGHT_BITS, on
+    top of the discrete-log assumption that log_g h is unknown.
+
+    Because the weights are random this returns a probabilistic accept; pass
+    `randfunc` only for deterministic tests.  Use verify_share when a single
+    corrupt share must be pinpointed.
     """
     f = _commit_field(field)
     qf = _arith(field)
@@ -1146,6 +1298,8 @@ def batch_verify(shares, transcript, field=None):
         return False
     if not shares:
         return False
+    draw = randfunc if randfunc is not None else (
+        lambda: secrets.randbits(BATCH_WEIGHT_BITS))
     commitments = transcript["commitments"]
     S = 0
     R = 0
@@ -1158,10 +1312,11 @@ def batch_verify(shares, transcript, field=None):
             return False
         if not (0 <= s < qf.p and 0 <= r < qf.p):
             return False
-        S = qf.add(S, s)
-        R = qf.add(R, r)
+        weight = (draw() % ((1 << BATCH_WEIGHT_BITS) - 1)) + 1
+        S = qf.add(S, qf.mul(s, weight))
+        R = qf.add(R, qf.mul(r, weight))
         xr = x % f.q
-        power = 1
+        power = weight % f.q
         for j in range(len(exps)):
             exps[j] = (exps[j] + power) % f.q
             power = (power * xr) % f.q

@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shamir import (core, dkg, format, gf, gf256, hierarchical, hybrid,
                     multisecret, proactive, pvss, reshare, robust, unified,
                     vss, weighted)
-from shamir.gf import default_field
+from shamir.gf import insecure_test_field as default_field
 from shamir.gf256 import FIELD_256
 
 _rng = random.Random(20260814)
@@ -351,16 +351,16 @@ def test_weighted_unequal_weights():
     w = weighted.weighted_share(777, [1, 2, 3], 3, f, _rand)
     assert [len(v) for v in w.values()] == [1, 2, 3]
     assert len({x for g in w.values() for x, _ in g}) == 6
-    assert weighted.weighted_combine({2: w[2]}, 3) == 777
-    assert weighted.weighted_combine({0: w[0], 1: w[1]}, 3) == 777
-    raises(ValueError, weighted.weighted_combine, {1: w[1]}, 3)
+    assert weighted.weighted_combine({2: w[2]}, 3, f) == 777
+    assert weighted.weighted_combine({0: w[0], 1: w[1]}, 3, f) == 777
+    raises(ValueError, weighted.weighted_combine, {1: w[1]}, 3, f)
 
 
 def test_weighted_equal_weights():
     f = default_field()
     g = weighted.weighted_share(99, [1, 1, 1], 2, f, _rand)
-    assert weighted.weighted_combine({0: g[0], 1: g[1]}, 2) == 99
-    raises(ValueError, weighted.weighted_combine, {0: g[0]}, 2)
+    assert weighted.weighted_combine({0: g[0], 1: g[1]}, 2, f) == 99
+    raises(ValueError, weighted.weighted_combine, {0: g[0]}, 2, f)
 
 
 def test_hierarchical_two_levels():
@@ -1082,6 +1082,129 @@ def main():
     print('\n%d/%d tests passed' % (passed, len(tests)))
     if failed:
         sys.exit(1)
+
+
+# --- regression tests for the hardening pass -------------------------------
+
+def test_pedersen_h_has_no_known_discrete_log():
+    """h must not be g^c for any publicly derivable c.
+
+    default_field() used to set h = g^(SHA-256(public seed) mod q), which
+    publishes log_g h and destroys binding.
+    """
+    import hashlib
+    from shamir.gf import default_field as secure_field, H_SEED
+    f = secure_field()
+    for seed in (H_SEED, b'sssx merged pedersen h seed v1'):
+        c = int.from_bytes(hashlib.sha256(seed).digest(), 'big') % f.q
+        assert pow(f.g, c, f.p) != f.h
+    assert pow(f.h, f.q, f.p) == 1          # still in the order-q subgroup
+    assert f.h not in (0, 1, f.p - 1)
+
+
+def test_forged_share_with_known_trapdoor_is_rejected():
+    """The equivocation that a known log_g h would enable must fail."""
+    f = default_field()
+    shares, _keys, tr = unified.deal(123456789, 3, 6, f, _rand)
+    x, s, r = shares[0]
+    for delta in (1, 999999):
+        for guess in (2, 3, 12345):
+            forged = (x, (s + delta) % f.q, (r - delta * pow(guess, f.q - 2, f.q)) % f.q)
+            assert not unified.verify_share(forged, tr, f)
+
+
+def test_transcript_publishes_no_polynomial_evaluation():
+    """No transcript field may be an evaluation of P or R.
+
+    The old transcript published digest = P(254) and digest_blinder = R(254),
+    so t shares plus the public transcript interpolated the secret.
+    """
+    f = default_field()
+    secret = 424242424242
+    shares, _keys, tr = unified.deal(secret, 3, 7, f, _rand)
+    assert 'digest' not in tr and 'digest_blinder' not in tr
+    qf = f.share_field()
+    for x in range(1, 255):
+        for value in (qf.polynomial_eval([secret], x),):
+            assert value not in tr.values()
+    # t shares must not determine the secret: any candidate remains possible
+    sub = [(sh[0], sh[1]) for sh in shares[:3]]
+    assert len(sub) == tr['threshold']
+    ok = unified.combine(tr, [tuple(sh) for sh in shares[:4]], field=f)
+    assert ok == secret
+    raises(ValueError, lambda: unified.combine(tr, [tuple(sh) for sh in shares[:3]], field=f))
+
+
+def test_batch_verify_rejects_cancelling_errors():
+    """Unweighted batching accepts two errors that cancel; BGR weights must not."""
+    f = default_field()
+    qf = f.share_field()
+    shares, _keys, tr = unified.deal(777, 2, 6, f, _rand)
+    (x1, s1, r1), (x2, s2, r2) = shares[0], shares[1]
+    d = 12345
+    forged = [(x1, qf.add(s1, d), r1), (x2, qf.sub(s2, d), r2)]         + [tuple(sh) for sh in shares[2:]]
+    assert unified.batch_verify([tuple(sh) for sh in shares], tr, f)
+    for _ in range(8):
+        assert not unified.batch_verify(forged, tr, f)
+
+
+def test_audit_possession_is_fresh_and_zero_knowledge():
+    f = default_field()
+    shares, _keys, tr = unified.deal(777, 2, 5, f, _rand)
+    share = tuple(shares[0])
+    x = share[0]
+
+    ch = unified.audit_challenge(tr, x, epoch=7)
+    proof = unified.prove_possession(share, tr, ch, f)
+    assert unified.verify_possession(proof, tr, ch, f)
+
+    # a stored proof must not answer any later challenge
+    for later in (unified.audit_challenge(tr, x, epoch=8),
+                  unified.audit_challenge(tr, x, epoch=7)):
+        assert not unified.verify_possession(proof, tr, later, f)
+
+    # nor a challenge aimed at a different slot
+    other = unified.audit_challenge(tr, shares[1][0], epoch=7)
+    assert not unified.verify_possession(proof, tr, other, f)
+
+    # the proof carries no share material
+    assert share[1] not in proof.values()
+    assert share[2] not in proof.values()
+
+    # a holder without the share cannot answer
+    raises(ValueError, unified.prove_possession,
+           (x, (share[1] + 1) % f.q, share[2]), tr, ch, f)
+
+
+def test_audit_round_verdicts():
+    f = default_field()
+    shares, _keys, tr = unified.deal(777, 2, 5, f, _rand)
+    chs = {sh[0]: unified.audit_challenge(tr, sh[0], epoch=3) for sh in shares}
+    responses = {sh[0]: unified.prove_possession(tuple(sh), tr, chs[sh[0]], f)
+                 for sh in shares[:3]}
+    responses[shares[3][0]] = None
+    stale = unified.prove_possession(
+        tuple(shares[4]), tr, unified.audit_challenge(tr, shares[4][0], epoch=2), f)
+    responses[shares[4][0]] = stale
+    verdicts = unified.audit_holders(tr, chs, responses, f)
+    assert verdicts[shares[0][0]] == 'held'
+    assert verdicts[shares[3][0]] == 'missing'
+    assert verdicts[shares[4][0]] == 'invalid'
+
+
+def test_default_field_is_large_enough():
+    from shamir.gf import default_field as secure_field
+    f = secure_field()
+    assert f.p.bit_length() >= 2048
+    assert f.q.bit_length() >= 2047
+    assert f.p == 2 * f.q + 1
+
+
+def test_make_safe_prime_runs():
+    from shamir.gf import make_safe_prime, _is_probable_prime
+    p, q = make_safe_prime(64)
+    assert p == 2 * q + 1
+    assert _is_probable_prime(p) and _is_probable_prime(q)
 
 
 if __name__ == '__main__':
