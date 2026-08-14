@@ -26,7 +26,7 @@ API reference.
 | Scheme tag | `"unified-v2"` (`_SCHEME`); note the bundle *container* format is independently `"unified-v3"` (`_BUNDLE_FORMAT`) — the two version counters are separate (see §6.1) |
 | Share | `(x, s_i, r_i)` — two field elements: the Shamir value *and* a Pedersen masking value |
 | Transcript | public dict: scheme, 16-byte session, threshold, n, secrets, commitments, digest + blinder, Schnorr PoK, MAC tags |
-| Field | safe prime p = 2q+1, 512-bit; share arithmetic in **Z_q** (deliberately), commitment arithmetic in the order-q subgroup of Z_p\* |
+| Field | safe prime p = 2q+1, 2048-bit (512-bit group retained as `insecure_test_field()` for tests); share arithmetic in **Z_q** (deliberately), commitment arithmetic in the order-q subgroup of Z_p\* |
 | Digest point | x = 254 (SLIP-0039 convention, `_DIGEST_INDEX`) |
 | Sibling modules (not merged) | `pvss.py` (recipient privacy), `gf256.py` (GF(2^8) field), `hierarchical.py` (Birkhoff-derivative hierarchies, plain and committed), `weighted.py` (standalone weighted scheme) |
 
@@ -46,9 +46,13 @@ publicly checkable against the commitments.
 - Fixed 512-bit safe prime `p = 2q + 1` (both prime, tested at import time in
   `default_field()`).
 - `g = 2^2 = 4`: a quadratic residue, hence of exact order q in Z_p\*.
-- `h = g^c` with `c = SHA-256("sssx merged pedersen h seed v1") mod q`: a
-  public, deterministic second generator whose discrete log base g is
-  computationally unknown — the Pedersen binding assumption.
+- `h = hash_to_subgroup(p, q, seed)`: the seed is hashed and squared *into*
+  the order-q subgroup, so h is publicly recomputable but its discrete log
+  base g is unknown to everyone, including whoever chose the seed. The
+  earlier `h = g^{SHA-256(seed) mod q}` published log_g h as a derivable
+  constant and therefore destroyed binding entirely: given any valid share
+  `(s, r)` and any delta, `(s + delta, r - delta/c)` opened the same
+  commitment and passed `verify_share`, `batch_verify` and `audit`.
 - **The key anti-bug decision**: `GF.share_field()` returns `GF(q)`, not
   `GF(p)`. All secret/shares/coefficient arithmetic therefore lives in
   Z_q *exactly*, while commitment exponentiation lives in the order-q
@@ -71,8 +75,12 @@ R(x) = b_0 + b_1 x + ... + b_t x^t      (the masking polynomial, fully random)
   `g^{s_i} h^{r_i} == prod_j C_j^{x^j}` — but the secret is
   *information-theoretically* hidden by the random R polynomial (perfect
   masking, since R is uniform over Z_q; see §7).
-- Digest point: `(P(254), R(254))` published, checkable via the same
-  exponent-relation against the commitments.
+- **No evaluation of the secret polynomial is published.** An earlier
+  version put `digest = P(254)` and `digest_blinder = R(254)` in the public
+  transcript, which handed every observer a free (t+1)-th point: t colluding
+  holders interpolated the secret, and at t=1 a single holder did it alone.
+  Reconstruction is instead screened coefficient by coefficient against the
+  commitments, which checks all t+1 coefficients rather than one evaluation.
 - **Per-coefficient Schnorr proofs of knowledge** (`_coeff_pok_entries`,
   unified.py:213): one sigma-protocol entry per coefficient, proving knowledge
   of the opening `(a_j, b_j)` of *every* commitment — not just C_0. This is
@@ -338,9 +346,11 @@ survives the bundle round-trip).
   (SHAKE256 stream XOR + HMAC tag — the pure-stdlib AEAD stand-in) and the
   ciphertext dispersed into n strided chunks keyed by the share
   x-coordinates. Reconstruction needs t+1 shares *and* all chunks.
-- `batch_verify` (BGR '98): verifies a whole share collection in one
-  multi-exponentiation `g^{Σs} h^{Σr} == prod C_j^{Σ x_i^j}` — O(n+t) work
-  instead of O(nt), sound up to DLP.
+- `batch_verify` (BGR '98): the *small exponents test*. Each share gets a
+  fresh 128-bit weight d_i and the check is
+  `g^{Σ d_i s_i} h^{Σ d_i r_i} == prod C_j^{Σ d_i x_i^j}`, O(n+t) work
+  instead of O(nt). The weights are load-bearing: the unweighted sum is a
+  checksum that accepts two errors which cancel.
 
 ---
 
@@ -443,3 +453,34 @@ Status: `python tests/test_all.py` → 86/86 passing, including the property
 fuzz (`test_unified_property_fuzz`), corruption tests, and the threshold-sign
 regression tests. No lint/typecheck tooling configured — verification is
 `py_compile` + the test runner.
+
+---
+
+## 10. Auditor layer (added for the Guardian Protocol auditor node)
+
+`prove_share` is replayable by construction: its Fiat-Shamir challenge binds
+only `(session, x, T)`, so a single proof answers every future audit and any
+observer can replay it. `GUARDIAN_ROTATION_DESIGN.md` lists replayed
+challenges as an explicit attack, so sampled possession gets its own
+primitive:
+
+| Call | Role |
+|---|---|
+| `audit_challenge(transcript, x, epoch)` | auditor mints a single-use 32-byte nonce bound to session, slot and epoch |
+| `prove_possession(share, transcript, challenge)` | holder answers with a Schnorr proof of the Pedersen opening; the challenge hash binds the nonce and epoch |
+| `verify_possession(proof, transcript, challenge)` | auditor checks it; a proof for any other nonce, epoch, slot or session fails |
+| `audit_holders(transcript, challenges, responses)` | one sampling round, returning `held` / `invalid` / `missing` per slot |
+
+Properties, matching R15 and the slashing boundary in the guardian design:
+
+- **Trustless.** The auditor needs only the public transcript. It holds no
+  share, no MAC key and no secret, and it cannot authorize anything.
+- **Knowledgeless.** The proof is honest-verifier zero knowledge and exactly
+  distributed (responses live in Z_q), so a full round teaches the auditor
+  only which slots answered correctly.
+- **Fresh.** A stored proof is useless against the next challenge, so a valid
+  response is evidence of possession *at that challenge*, not in general.
+- **Evidence semantics.** `invalid` means a response was given and failed to
+  verify, which is an attributable cryptographic fault. `missing` is
+  operational evidence only, because the network may be at fault; the
+  guardian design is explicit that absence is not proof of loss.
