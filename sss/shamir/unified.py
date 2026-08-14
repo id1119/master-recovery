@@ -1,4 +1,4 @@
-"""The unified scheme v2 (U-SSS): one construction absorbing the SSS lineage.
+"""The unified scheme v4 (U-SSS): one construction absorbing the SSS lineage.
 
 A single (t+1)-of-n construction over a safe-prime field that synthesizes the
 independent improvements to plain Shamir (1979) secret sharing:
@@ -11,8 +11,9 @@ independent improvements to plain Shamir (1979) secret sharing:
   Schoenmakers-PVSS practice): the deal is bound to a dealer who knows the
   whole committed polynomial -- commitments cannot be replayed or swapped
   in from another context, and an extractor can always open; verified
-  publicly (per-coefficient entries; legacy single-C_0 proofs still
-  verify).
+  publicly (per-coefficient entries; every Fiat-Shamir challenge binds the
+  full statement, i.e. the commitment vector, so a proof minted against one
+  transcript cannot verify against another).
 * Rabin & Ben-Or (STOC 1989) pairwise MACs with the Cevallos-Fehr-Ostrovsky-
   Rabani (EUROCRYPT 2012) iterative acceptance-graph filter: when a combiner
   holds the dealer's keys, shares are accepted only if certified by t+1
@@ -114,7 +115,7 @@ import secrets
 from . import core, robust
 from .format import session_id
 
-_SCHEME = "unified-v3"
+_SCHEME = "unified-v4"
 _DIGEST_INDEX = 254  # same digest point as shamir.format.DIGEST_POINT_X
 _POK_DOMAIN = b"sssx unified pok v1"
 _COEFF_POK_DOMAIN = b"sssx unified coeff-pok v1"
@@ -128,9 +129,9 @@ _NONCE_LEN = 16
 _TAG_LEN = 32
 _KEY_LEN = 32
 _BLOCK = 64
-_BUNDLE_FORMAT = "unified-v3"
+_BUNDLE_FORMAT = "unified-v4"
 _BLOB_MAGIC = b"SSSU"
-_BLOB_VERSION = 0x01
+_BLOB_VERSION = 0x02
 _BLOB_CHECKSUM_LEN = 8
 
 
@@ -203,15 +204,25 @@ def _challenge_pok(session, n, threshold, commitments, t_val, cf):
     return int.from_bytes(hashlib.sha256(bytes(data)).digest(), "big") % cf.q
 
 
-def _challenge_coeff(session, j, t_val, cf):
-    """Challenge for the per-coefficient PoK of s_poly[j] (index-bound)."""
+def _challenge_coeff(session, j, commitments, t_val, cf):
+    """Challenge for the per-coefficient PoK of s_poly[j].
+
+    Binds the full statement (all commitments) as well as the session, the
+    coefficient index and the first message T.  Legacy `_challenge_pok`
+    already bound the commitments; the per-coefficient variant did not, so a
+    proof minted against one triple was re-verifiable against any other
+    triple with the same session/index/T.  Fiat-Shamir challenges must bind
+    the statement: this closes the concurrency-style transcript-swap gap.
+    """
     w = _group_width(cf)
     data = bytearray(_COEFF_POK_DOMAIN + session + j.to_bytes(2, "big"))
+    for c in commitments:
+        data += c.to_bytes(w, "big")
     data += t_val.to_bytes(w, "big")
     return int.from_bytes(hashlib.sha256(bytes(data)).digest(), "big") % cf.q
 
 
-def _coeff_pok_entries(s_poly, r_poly, session, draw, f, qf):
+def _coeff_pok_entries(s_poly, r_poly, commitments, session, draw, f, qf):
     """Schnorr proof of knowledge of the opening of every commitment.
 
     One entry per coefficient: proves knowledge of (s_poly[j], r_poly[j])
@@ -224,7 +235,7 @@ def _coeff_pok_entries(s_poly, r_poly, session, draw, f, qf):
     for j, (a, b) in enumerate(zip(s_poly, r_poly)):
         ua, ub = draw(), draw()
         t_val = f.commit_double(ua, ub)
-        ch = _challenge_coeff(session, j, t_val, f)
+        ch = _challenge_coeff(session, j, commitments, t_val, f)
         entries.append({
             "index": j,
             "T": t_val,
@@ -274,7 +285,8 @@ def _deal(coefficients, threshold, n, field=None, randfunc=None):
         "challenge": ch,
         "za": (ua + ch * s_poly[0]) % qf.p,
         "zb": (ub + ch * r_poly[0]) % qf.p,
-        "entries": _coeff_pok_entries(s_poly, r_poly, session, _draw, f, qf),
+        "entries": _coeff_pok_entries(s_poly, r_poly, commitments, session,
+                                      _draw, f, qf),
     }
 
     keys = {}
@@ -397,8 +409,8 @@ def distributed_run(n, threshold, field=None, randfunc=None, corrupt=(),
         r_poly = [_draw() for _ in range(threshold + 1)]
         commitments = [f.commit_double(a, b) for a, b in
                        zip(s_poly, r_poly)]
-        pok = {"entries": _coeff_pok_entries(s_poly, r_poly, dealer_session,
-                                             _draw, f, qf)}
+        pok = {"entries": _coeff_pok_entries(s_poly, r_poly, commitments,
+                                             dealer_session, _draw, f, qf)}
         deals[dealer] = (s_poly, r_poly, commitments, pok)
 
     recipients = {r: {} for r in range(1, n + 1)}
@@ -483,7 +495,7 @@ def _pok_entries_ok(entries, commitments, session, threshold, f):
             f._check_subgroup(t2)
         except ValueError:
             return False
-        c2 = _challenge_coeff(session, entry["index"], t2, f)
+        c2 = _challenge_coeff(session, entry["index"], commitments, t2, f)
         if entry["challenge"] != c2:
             return False
         if f.commit_double(entry["za"], entry["zb"]) != \
@@ -578,6 +590,8 @@ def _challenge_share(transcript, x, t_val, cf):
     w = _group_width(cf)
     data = bytearray(_SHARE_POK_DOMAIN + transcript["session"])
     data += x.to_bytes(2, "big")
+    for c in transcript["commitments"]:
+        data += c.to_bytes(w, "big")
     data += t_val.to_bytes(w, "big")
     return int.from_bytes(hashlib.sha256(bytes(data)).digest(), "big") % cf.q
 
@@ -674,6 +688,8 @@ def _challenge_possession(transcript, challenge, t_val, cf):
     data += challenge["x"].to_bytes(2, "big")
     data += challenge["epoch"].to_bytes(8, "big")
     data += bytes(challenge["nonce"])
+    for c in transcript["commitments"]:
+        data += c.to_bytes(w, "big")
     data += t_val.to_bytes(w, "big")
     return int.from_bytes(hashlib.sha256(bytes(data)).digest(), "big") % cf.q
 
@@ -1127,8 +1143,7 @@ def derive_share(transcript, shares, y, field=None):
         if not verify_share(share, transcript, f):
             raise ValueError("share at index %d failed verification" % share[0])
     if not (1 <= y <= 253):
-        raise ValueError("target index must be in 1..253 (254 is the digest"
-                         " point)")
+        raise ValueError("target index must be in 1..253 (share space)")
     if y in xs:
         raise ValueError("target index %d already in use" % y)
     cache = core.LagrangeCache(xs, qf)
@@ -1138,6 +1153,51 @@ def derive_share(transcript, shares, y, field=None):
     if (s_y != 0 or r_y != 0) and not verify_share(derived, transcript, f):
         raise ValueError("derived share failed verification (internal error)")
     return derived
+
+
+def rejoin_share(transcript, shares, x, field=None):
+    """Rebuild the share at an OCCUPIED holder slot x (no dealer, no secret).
+
+    Guardian repair: when the holder at coordinate x is lost, any threshold+1
+    remaining holders can recompute the exact (x, s_x, r_x) triple -- the
+    slot keeps its identity and its committed value, so a replacement
+    guardian takes over an existing slot without re-dealing or revealing the
+    secret.  The inverse of derive_share, which deliberately refuses an
+    occupied coordinate (a new *member* must take a fresh index); rejoin is
+    the same Herzberg et al. 1995 recovery primitive for the lost-slot case
+    (mirrors shamir.proactive.recover_share, generalized to the unified
+    triple and commitment-screened).
+
+    `shares` must be at least threshold+1 verified shares of the transcript,
+    not including x.  The recomputed share is verified against the
+    transcript's commitments before it is returned (the committed polynomial
+    is fixed, so a wrong rejoin is detected rather than distributed).
+    """
+    f = _commit_field(field)
+    qf = _arith(field)
+    if not verify_transcript(transcript, f):
+        raise ValueError("transcript failed public verification")
+    threshold = transcript["threshold"]
+    if len(shares) < threshold + 1:
+        raise ValueError("need at least threshold + 1 (%d) shares, got %d"
+                         % (threshold + 1, len(shares)))
+    xs = [xx for xx, _, _ in shares]
+    if len(set(xs)) != len(xs):
+        raise ValueError("duplicate share x-coordinates")
+    if not (1 <= x <= 253):
+        raise ValueError("target index must be in 1..253")
+    if x in xs:
+        raise ValueError("target index %d is among the input shares" % x)
+    for share in shares:
+        if not verify_share(share, transcript, f):
+            raise ValueError("share at index %d failed verification" % share[0])
+    cache = core.LagrangeCache(xs, qf)
+    s_x = cache.evaluate([s for _, s, _ in shares], x)
+    r_x = cache.evaluate([r for _, _, r in shares], x)
+    rejoined = (x, s_x, r_x)
+    if (s_x != 0 or r_x != 0) and not verify_share(rejoined, transcript, f):
+        raise ValueError("rejoined share failed verification (internal error)")
+    return rejoined
 
 
 def recover_exponent(transcript, shares, field=None):
@@ -1194,7 +1254,7 @@ def _challenge_sig(message, r_val, y_val, f):
 
 
 def threshold_sign(message, transcript, shares, nonce_transcript, nonce_shares,
-                   signers, field=None):
+                   signers, field=None, drop_invalid=False):
     """Threshold Schnorr signature over the unified sharing: sign WITHOUT
     ever reconstructing the key (the knowledgeless path).
 
@@ -1214,6 +1274,15 @@ def threshold_sign(message, transcript, shares, nonce_transcript, nonce_shares,
     k, or any individual share.  Honest caveat (documented, all threshold
     Schnorr schemes): never reuse a nonce sharing for two messages -- z1 - z2
     = c1*x - c2*x leaks the key.
+
+    Malicious-signer handling: every signer's key and nonce share is checked
+    against its transcript *before* the partial is computed, so a corrupt or
+    swapped share is attributed to its signer index rather than silently
+    contaminating z.  With drop_invalid=True the failing signers are excluded
+    from the partial sum (reported in detail["rejected"]) and the signature
+    is produced from the remaining verified signers -- matching the
+    protocol-level "accept only distinct valid contributions, request
+    replacements" rule (PROTOCOL.md 3.4).
     """
     f = _commit_field(field)
     qf = _arith(field)
@@ -1231,29 +1300,47 @@ def threshold_sign(message, transcript, shares, nonce_transcript, nonce_shares,
     nonce_by_x = {x: (s, r) for x, s, r in nonce_shares}
     if len(key_by_x) != len(shares) or len(nonce_by_x) != len(nonce_shares):
         raise ValueError("duplicate share x-coordinates")
+    rejected = []
+    for i in signers:
+        if i not in key_by_x or i not in nonce_by_x:
+            rejected.append(i)
+            continue
+        if not verify_share((i, key_by_x[i][0], key_by_x[i][1]),
+                            transcript, f) or \
+                not verify_share((i, nonce_by_x[i][0], nonce_by_x[i][1]),
+                                 nonce_transcript, f):
+            rejected.append(i)
+    clean = [i for i in signers if i not in rejected]
+    if len(clean) < threshold + 1:
+        raise ValueError("signer set collapses below threshold + 1 after "
+                         "rejecting %d invalid signer(s): %s"
+                         % (len(rejected), sorted(rejected)))
+    if rejected and not drop_invalid:
+        raise ValueError("invalid signer contribution(s) from index(es) %s "
+                         "(pass drop_invalid=True to sign with the remaining"
+                         " signers)" % sorted(rejected))
     r_val = recover_exponent(nonce_transcript,
-                             [sh for sh in nonce_shares if sh[0] in signers],
+                             [sh for sh in nonce_shares if sh[0] in clean],
                              f)
     y_val = recover_exponent(transcript,
-                             [sh for sh in shares if sh[0] in signers], f)
+                             [sh for sh in shares if sh[0] in clean], f)
     if r_val == 1:
         raise ValueError("nonce k == 0: draw a fresh nonce sharing")
     if y_val == 1:
         raise ValueError("key x == 0: refuse to sign with a zero key")
     c_val = _challenge_sig(message, r_val, y_val, f)
-    signer_xs = [i for i in signers]
+    signer_xs = [i for i in clean]
     lambdas = core.lagrange_coefficient(signer_xs, 0, qf)
     z = 0
     partials = {}
     for lam, i in zip(lambdas, signer_xs):
-        if i not in key_by_x or i not in nonce_by_x:
-            raise ValueError("signer %d missing from a sharing" % i)
         (sx, _rx) = key_by_x[i]
         (sk, _rk) = nonce_by_x[i]
         z_i = qf.mul(lam, qf.add(sk, qf.mul(c_val, sx)))
         z = qf.add(z, z_i)
         partials[i] = z_i
-    return r_val, z, y_val, {"c": c_val, "partials": partials}
+    detail = {"c": c_val, "partials": partials, "rejected": list(rejected)}
+    return r_val, z, y_val, detail
 
 
 def verify_signature(message, r_val, z, y_val, field=None):
@@ -1471,7 +1558,7 @@ def _classify_shares(transcript, shares, mac_keys, field):
             seen.add(x)
             statuses[x] = st
         else:
-            statuses[len(statuses)] = st
+            statuses[-len(statuses) - 1] = st
     return statuses
 
 
@@ -1481,8 +1568,10 @@ def audit(transcript, shares, mac_keys=None, field=None):
     Classifies every submitted share and reports exactly which are corrupted
     or malformed, plus the reconstruction outcome.  Returns
     (outcome, statuses, reason) where outcome is the recovered secret (list
-    for multi-secret, int for single) or None, statuses maps each x to a
-    diagnosis, and reason explains any failure:
+    for multi-secret, int for single) or None, statuses maps each holder x
+    to a diagnosis, malformed shares (bad shape, index or range) are keyed
+    -1, -2, ... so they can never overwrite a real holder's verdict, and
+    reason explains any failure:
       'ok', 'raw', 'bad_index', 'out_of_range', 'duplicate', 'commit',
       'mac', 'unrecoverable', 'digest'
     """
@@ -1540,11 +1629,10 @@ def refresh(share, transcript, field=None, randfunc=None, corrupt=()):
 
     * new_share:     (x, s', r') with the same secret and fresh randomness.
     * new_transcript: same session, updated commitments (constant term
-                      unchanged), updated digest point, mac_tags cleared and
-                      proof dropped (dealer-epoch layers).
+                      unchanged), mac_tags cleared and proof dropped
+                      (dealer-epoch layers).
     * info:          {received: [(dealer, d_s, d_r)], commitments_i:
-                      {dealer: [C_1..C_t]}
-                      (delta_s(254), delta_r(254))}}.
+                      {dealer: [C_1..C_t]}}.
 
     `corrupt` is a set of dealer indices dealing a nonzero-constant delta
     (to test detection); the refresh then raises ValueError naming the first
@@ -1608,14 +1696,15 @@ def redistribute(shares, transcript, new_threshold, new_n, field=None,
     The first t+1 shares form the holder set; each holder deals a fresh
     Pedersen pair (h_i, m_i) with h_i(0) equal to its own s-value and
     m_i(0) to its own r-value; recipient j combines the lambda-weighted
-    evaluations.  New commitments are derived in the exponent and the new
-    digest point from the holders' posted (h_i(254), m_i(254)) values.
+    evaluations.  New commitments are derived in the exponent.
 
     Returns (new_shares, new_transcript, posted):
     * new_shares:     [(j, s''_j, r''_j)] for j in 1..new_n.
     * new_transcript: same session, new threshold/n, commitments, digest
                       point, mac_tags cleared and proof dropped.
-    * posted:         {holder_x: (h_i(254), m_i(254))}.
+    * posted:         {} (reserved; nothing is published during
+                      redistribution -- no polynomial evaluation may leave
+                      the protocol, see _screen_against_commitments).
     """
     f = _commit_field(field)
     qf = _arith(field)
@@ -1680,38 +1769,82 @@ def redistribute(shares, transcript, new_threshold, new_n, field=None,
     return new_shares, new_transcript, posted
 
 
+def change_threshold(shares, transcript, new_threshold, new_n, field=None,
+                     randfunc=None):
+    """Single-dealer threshold change: re-deal the same secret(s) under new
+    (t', n') parameters.
+
+    The dealer (single caller) verifies every old share against the old
+    commitments, reconstructs the secret(s) through the full pipeline
+    (CFOR/MAC, Berlekamp-Welch, commitment screen), and deals a fresh
+    sharing under the new parameters -- same session, fresh commitments and
+    a fresh dealer proof.  This is the one-call analogue of
+    shamir.reshare.change_threshold for the unified scheme: configuration
+    migration (a roster or threshold change) without touching the secret.
+
+    Returns (new_shares, mac_keys, new_transcript) exactly like `deal`, so
+    the output drops straight into the pipeline (combine, seal, audit, ...).
+    """
+    f = _commit_field(field)
+    qf = _arith(field)
+    if not verify_transcript(transcript, f):
+        raise ValueError("transcript failed public verification")
+    _check_params(new_threshold, new_n)
+    threshold = transcript["threshold"]
+    if len(shares) < threshold + 1:
+        raise ValueError("need at least threshold + 1 (%d) old shares, got %d"
+                         % (threshold + 1, len(shares)))
+    xs = [x for x, _, _ in shares]
+    if len(set(xs)) != len(xs):
+        raise ValueError("duplicate share x-coordinates")
+    for share in shares:
+        if not verify_share(share, transcript, f):
+            raise ValueError("old share at index %d failed verification"
+                             % share[0])
+    if transcript["secrets"] == 1:
+        secret = combine(transcript, shares, field=f)
+        secrets = [secret]
+    else:
+        secrets = combine(transcript, shares, field=f)
+    new_shares, mac_keys, new_transcript = _deal(
+        secrets, new_threshold, new_n, f, randfunc)
+    return new_shares, mac_keys, new_transcript
+
+
 # --------------------------------------------------------------------------
 # Portable bundle: seal / unseal (misuse-resistant end-to-end pipeline)
 # --------------------------------------------------------------------------
 # A bundle is a JSON-serializable dict carrying the whole deal: the transcript
-# (commitments in hex, digest point, PoK), session-bound checksummed share
+# (commitments in hex, PoK), session-bound checksummed share
 # blobs for every holder, and optionally the dealer's MAC keys.  unseal
 # validates every layer on the way back -- bundle format, transcript public
-# verification, each blob's checksum and session id -- and then the digest.
-# Cross-session or cross-bundle mixing therefore fails loudly.
+# verification, each blob's checksum and session id -- and then the
+# commitment screen. Cross-session or cross-bundle mixing therefore fails
+# loudly.
 
 def _encode_blob(x, s, r, session, width):
     payload = s.to_bytes(width, "big") + r.to_bytes(width, "big")
-    header = _BLOB_MAGIC + bytes([_BLOB_VERSION, width, x]) + session
+    header = _BLOB_MAGIC + bytes([_BLOB_VERSION]) + width.to_bytes(2, "big") \
+        + bytes([x]) + session
     tag = hashlib.sha256(header + payload).digest()[:_BLOB_CHECKSUM_LEN]
     return header + payload + tag
 
 
 def _decode_blob(blob, session, width):
-    fixed = 4 + 1 + 1 + 1 + 16
+    fixed = 4 + 1 + 2 + 1 + 16
     if len(blob) != fixed + 2 * width + _BLOB_CHECKSUM_LEN:
         raise ValueError("share blob has wrong length")
     if blob[:4] != _BLOB_MAGIC:
         raise ValueError("bad share magic")
     if blob[4] != _BLOB_VERSION:
         raise ValueError("unsupported share blob version")
-    if blob[5] != width:
+    if int.from_bytes(blob[5:7], "big") != width:
         raise ValueError("share blob width mismatch")
-    x = blob[6]
-    sess = blob[7:23]
-    payload = blob[23:23 + 2 * width]
-    given = blob[23 + 2 * width:]
-    expected = hashlib.sha256(blob[:23] + payload).digest()[:_BLOB_CHECKSUM_LEN]
+    x = blob[7]
+    sess = blob[8:24]
+    payload = blob[24:24 + 2 * width]
+    given = blob[24 + 2 * width:]
+    expected = hashlib.sha256(blob[:24] + payload).digest()[:_BLOB_CHECKSUM_LEN]
     if not hmac.compare_digest(given, expected):
         raise ValueError("share blob checksum mismatch (corrupted share)")
     if not hmac.compare_digest(sess, session):

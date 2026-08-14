@@ -43,7 +43,7 @@ def weighted_share(secret, weights, quota, field=None, randfunc=None):
     return out
 
 
-def weighted_combine(subshare_groups, quota, field=None):
+def weighted_combine(subshare_groups, quota, field):
     """Reconstruct the secret from weighted sub-shares (needs >= quota distinct points).
 
     subshare_groups is the dict {participant: [(x, y), ...]} returned by
@@ -51,6 +51,11 @@ def weighted_combine(subshare_groups, quota, field=None):
     deduped, and the secret is recovered by Lagrange interpolation at 0 over
     the surviving points.  Raises ValueError if fewer than `quota` distinct
     points are supplied.
+
+    `field` is REQUIRED: interpolation over the wrong modulus silently
+    returns a different value, so silently falling back to a default field
+    here would re-introduce exactly the cross-modulus wrong-secret bug this
+    parameter removes (the deal side already picks its field explicitly).
     """
     if quota < 1:
         raise ValueError("quota must be at least 1")
@@ -61,4 +66,4 @@ def weighted_combine(subshare_groups, quota, field=None):
     if len(points) < quota:
         raise ValueError("need at least %d distinct sub-shares to reconstruct"
                          % quota)
-    return interpolate_at(list(points.items()), 0, field)
+    return interpolate_at(list(points.items()), 0, field_for(field))

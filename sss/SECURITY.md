@@ -27,8 +27,8 @@ adversaries), `[COMP]` (computational, holds under a stated assumption), or
 | Share binding | `[COMP]` | A forged share that passes `verify_share` requires g^ds h^dr = 1 with (ds,dr) != 0, i.e. finding log_g h (DLP, 2048-bit safe prime). `h` is hashed *into* the subgroup by `gf.hash_to_subgroup`, so no party knows log_g h. Deriving it as g^{H(seed)} would publish the trapdoor and is the bug this replaced. |
 | Batch verification | `[COMP]` | `batch_verify` uses the BGR small-exponents test with a fresh 128-bit weight per share. Unweighted summation is *not* sound: two errors that cancel in the sum pass. Forgery probability about 2^-128 on top of DLP. |
 | Commitment binding (dealer) | `[COMP]` | Altering any committed coefficient after the deal breaks the transcript digest or a share check. DLP as above. |
-| PoK soundness (dealer, coefficients) | `[STANDARD]` | Per-coefficient Schnorr sigma protocols in `_coeff_pok_entries`: special-sound (two transcripts with the same T and distinct c give za-za' = c-c' times the opening; q prime => invertible, extraction error 1/q), challenge domain-separated per (session, index) and bound to T (unified.py `_challenge_coeff`). |
-| PoK soundness (share holdings) | `[STANDARD]` | `prove_share` proves knowledge of the Pedersen opening of C_x; `verify_share_proof` checks commitment = T*C_x^c; same extraction argument (challenge bound to session, x, T). |
+| PoK soundness (dealer, coefficients) | `[STANDARD]` | Per-coefficient Schnorr sigma protocols in `_coeff_pok_entries`: special-sound (two transcripts with the same T and distinct c give za-za' = c-c' times the opening; q prime => invertible, extraction error 1/q), challenge domain-separated per (session, index), bound to T **and to the full commitment vector** (unified.py `_challenge_coeff`). Statement binding is what makes the Fiat-Shamir programmability argument go through in the random-oracle model: a proof minted against one commitment vector cannot be re-verified against another. |
+| PoK soundness (share holdings) | `[STANDARD]` | `prove_share` proves knowledge of the Pedersen opening of C_x; `verify_share_proof` checks commitment = T*C_x^c; same extraction argument. The challenge binds session, x, T and the full commitment vector (`_challenge_share`), and `prove_possession`/`verify_possession` additionally bind the auditor nonce and epoch, so a stored possession proof cannot answer a later round. |
 | Zero knowledge (share proofs) | `[STANDARD]` | Honest-verifier zero knowledge: simulator picks c, za, zb uniform in Z_q and sets T = g^za h^zb * C_x^-c. Because shares and responses live in Z_q (**not** Z_p — `share_field` returns GF(q)), the simulated and real transcripts are *identically* distributed: exact, no statistical gap. Fiat-Shamir (non-interactive) adds the random-oracle assumption below. |
 | Verifier hygiene | `[COMP]`-independent | Every commitment, every PoK T value, every proof R and Y is checked to lie in the order-q subgroup (`_check_subgroup`), so verification equations live entirely in the subgroup and the algebraic arguments above apply. |
 | Corruption identification | `[IT]` for MACs, `[COMP]` public | Pairwise RBO MACs with dealer-epoch keys: forgery probability 1/q unconditional. Without keys, `audit_public` identifies exactly the shares failing the commitment check (computational binding). |
@@ -36,7 +36,9 @@ adversaries), `[COMP]` (computational, holds under a stated assumption), or
 | Wrong-secret / cross-session detection | `[COMP]` | The reconstructed polynomial is checked coefficient by coefficient against the commitments (`_screen_against_commitments`). The transcript publishes **no** evaluation of the secret polynomial. Publishing (P(254), R(254)) previously gave any t holders a free (t+1)-th point, lowering the privacy threshold by one. |
 | Sampled possession (auditor) | `[STANDARD]` | `audit_challenge` / `prove_possession` / `verify_possession`: Schnorr proof of the Pedersen opening whose Fiat-Shamir challenge binds an auditor nonce and epoch, so a stored proof cannot answer a later round. The auditor holds no key material and learns only which slots answered. |
 | Dealer-free setup soundness | `[COMP]` | `distributed_run` = Pedersen DKG + per-dealer PoKs: any disqualified dealer (failed share check or PoK) is excluded from QUAL; the group secret is never materialized; the emergent transcript is a normal unified transcript. |
-| Threshold signatures | `[STANDARD]` | `threshold_sign`: z = sum lambda_i (k_i + c x_i) over Lagrange weights => z = k + c x; verification g^z = R Y^c is the textbook Schnorr equation. Signing never reconstructs x or k. |
+| Threshold signatures | `[STANDARD]` | `threshold_sign`: z = sum lambda_i (k_i + c x_i) over Lagrange weights => z = k + c x; verification g^z = R Y^c is the textbook Schnorr equation. Signing never reconstructs x or k. Every signer's key and nonce share is verified against its transcript *before* the partial is computed, so an invalid signer contribution is attributed to its index (raise by default; `drop_invalid=True` signs with the surviving verified signers, reported in `detail["rejected"]` — the "accept only distinct valid contributions" rule from PROTOCOL.md 3.4). |
+| Slot repair / rejoin | `[STANDARD]` | `rejoin_share` recomputes the share at an *occupied* slot from any threshold+1 verified shares and screens the result against the commitments, so a lost guardian slot can be rebuilt by its replacement without the dealer or the secret (Herzberg et al. 1995 recovery; the rotate-and-repair primitive GUARDIAN_ROTATION_DESIGN.md needs). |
+| Threshold change | `[STANDARD]` | `change_threshold` verifies every old share, reconstructs through the full pipeline and re-deals under new (t', n') — configuration migration without touching the secret, one call. |
 
 ## 3. Assumption register (the honest "ifs")
 
@@ -63,12 +65,29 @@ adversaries), `[COMP]` (computational, holds under a stated assumption), or
   hand out P(254) and R(254) in the clear, so t colluding holders reached
   t+1 points and interpolated the secret; at threshold 1 one holder sufficed.
 - `batch_verify` weights each share (BGR small exponents) instead of summing.
+- Every Fiat-Shamir challenge now binds the full commitment vector (the
+  statement). v3-era `_challenge_coeff` bound only (session, index, T), so a
+  per-coefficient PoK was re-verifiable against a different commitment
+  vector with the same session/index/T — the Fiat-Shamir programmability
+  argument (and `distributed_run`'s rogue-key defense) needs the statement
+  bound. `_challenge_share` and `_challenge_possession` got the same fix;
+  scheme and bundle tags moved to `unified-v4`.
+- `audit` keys malformed shares -1, -2, ... instead of `len(statuses)`, which
+  could collide with a real holder index and silently overwrite its verdict.
+- `threshold_sign` verifies every signer's key and nonce share before use
+  and attributes invalid signers (see §2), instead of silently contaminating
+  z with an unverified share.
+- `weighted_combine` requires the field explicitly and no longer falls back
+  to `default_field()` — the fallback silently returned a wrong secret
+  whenever the sub-shares were dealt over another modulus.
 - The default field is 2048-bit, not 512-bit. `insecure_test_field()` keeps
   the old group for fast tests under an unmistakable name.
 - `make_safe_prime` called `secrets.getrandbits`, which does not exist, so
   no alternative field could ever be generated.
-- `weighted_combine` takes the field explicitly; it previously fell back to
-  `default_field()` and silently returned a wrong secret across moduli.
+- Share blob header encodes `width` as two bytes (blob version 0x02). A
+  2048-bit field has width 256, which overflowed the old single width byte:
+  `seal`/`unseal` raised on the production field while passing on the 512-bit
+  test field. Regression test: `test_unified_seal_on_production_field`.
 
 **Removed or tightened in the earlier rewrite:**
 
@@ -93,6 +112,11 @@ adversaries), `[COMP]` (computational, holds under a stated assumption), or
   commitments.
 - No audit, no conformance tests against reference implementations, no
   formal verification of the implementation (constant-time, etc.).
+- At the minimum deployment n = t+1 the pairwise-MAC acceptance graph
+  (`_acceptance_set`) is inert: every holder has only t = n-1 peers, and t+1
+  certifying votes are unreachable, so reconstruction falls through to the
+  commitment screen. The unconditional MAC layer therefore only engages when
+  n > t+1, i.e. exactly when there is redundancy to arbitrate.
 
 *If any property in section 2 is load-bearing for your use, obtain a real
 security review before production use.*

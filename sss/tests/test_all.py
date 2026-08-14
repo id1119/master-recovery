@@ -363,6 +363,11 @@ def test_weighted_equal_weights():
     raises(ValueError, weighted.weighted_combine, {0: g[0]}, 2, f)
 
 
+def test_weighted_combine_requires_field():
+    g = weighted.weighted_share(99, [1, 1, 1], 2, default_field(), _rand)
+    raises(TypeError, weighted.weighted_combine, {0: g[0], 1: g[1]}, 2)
+
+
 def test_hierarchical_two_levels():
     f = default_field()
     levels = [2, 3]
@@ -602,10 +607,11 @@ def test_unified_audit_malformed():
     mixed = [(1, 5), shares[1], shares[2], shares[3], shares[4]]
     outcome, statuses, reason = unified.audit(tr, mixed, field=f)
     assert outcome is None and reason == 'unrecoverable'
-    assert statuses[0] == 'raw'
+    assert statuses[-1] == 'raw'
+    assert all(statuses[x] == 'ok' for x in range(2, 6))
     bad_x = [(0, shares[0][1], shares[0][2])] + shares[1:]
     _o, statuses, _r = unified.audit(tr, bad_x, field=f)
-    assert statuses[0] == 'bad_index'
+    assert statuses[-1] == 'bad_index'
     oob = [(1, -1, 0)] + shares[2:]
     _o, statuses, _r = unified.audit(tr, oob, field=f)
     assert statuses[1] == 'out_of_range'
@@ -706,7 +712,7 @@ def test_unified_batch_verify():
 def test_unified_seal_unseal():
     f = default_field()
     bundle = unified.seal(31337, 2, 5, f, _rand)
-    assert bundle['format'] == 'unified-v3'
+    assert bundle['format'] == 'unified-v4'
     assert bundle['secret_kind'] == 'int'
     blobs = [b['blob'] for b in bundle['shares']]
     assert unified.unseal(bundle, blobs[:3], field=f) == 31337
@@ -744,6 +750,21 @@ def test_unified_seal_no_keys_and_kind_guard():
     assert 'keys' in with_keys
     wblobs = [b['blob'] for b in with_keys['shares']]
     assert unified.unseal(with_keys, wblobs[:2], field=f) == 7
+
+
+def test_unified_seal_on_production_field():
+    f = gf.default_field()
+    assert f.p.bit_length() >= 2048
+    rng = random.Random(99)
+    rand = lambda: rng.randrange(1 << 512)
+    bundle = unified.seal(424242, 1, 3, f, rand)
+    assert bundle['format'] == 'unified-v4'
+    blobs = [b['blob'] for b in bundle['shares']]
+    assert unified.unseal(bundle, blobs[:2], field=f) == 424242
+    assert unified.unseal(bundle, [blobs[0], blobs[2]], field=f) == 424242
+    bad = bytearray(bytes.fromhex(blobs[0]))
+    bad[30] ^= 0x01
+    raises(ValueError, unified.unseal, bundle, [bad.hex()] + blobs[1:], field=f)
 
 
 def test_unified_seal_bytes():
@@ -1008,6 +1029,86 @@ def test_unified_threshold_sign_dealer_free():
                                          [1, 2, 3], f)
     assert Y == key['public_key']
     assert unified.verify_signature(msg, R, z, Y, f)
+
+
+def test_unified_pok_challenge_binds_statement():
+    f = default_field()
+    _sa, _ka, tr_a = unified.deal(1, 2, 5, f, _rand)
+    _sb, _kb, tr_b = unified.deal(2, 2, 5, f, _rand)
+    entry = tr_a["proof"]["entries"][0]
+    ch_a = unified._challenge_coeff(tr_a["session"], entry["index"],
+                                    tr_a["commitments"], entry["T"], f)
+    ch_swap = unified._challenge_coeff(tr_a["session"], entry["index"],
+                                       tr_b["commitments"], entry["T"], f)
+    assert ch_a == entry["challenge"]
+    assert ch_swap != entry["challenge"]
+    assert unified._pok_entries_ok(tr_a["proof"]["entries"],
+                                   tr_a["commitments"], tr_a["session"], 2, f)
+    x, s, r = _sa[0]
+    proof = unified.prove_share((x, s, r), tr_a, f, _rand)
+    assert unified._challenge_share(tr_a, x, proof["T"], f) == proof["c"]
+    foreign = {"session": tr_a["session"], "commitments": tr_b["commitments"]}
+    assert unified._challenge_share(foreign, x, proof["T"], f) != proof["c"]
+
+
+def test_unified_audit_malformed_no_overwrite():
+    f = default_field()
+    shares, _keys, tr = unified.deal(777, 2, 5, f, _rand)
+    mixed = [(1, 5), "garbage", shares[2], shares[3], shares[4]]
+    _o, statuses, _r = unified.audit(tr, mixed, field=f)
+    assert statuses[-1] == 'raw' and statuses[-2] == 'raw'
+    assert statuses[3] == 'ok' and statuses[4] == 'ok' and statuses[5] == 'ok'
+    assert all(k < 0 for k in statuses if k not in (3, 4, 5))
+
+
+def test_unified_rejoin_share():
+    f = default_field()
+    secret = 31337
+    shares, _keys, tr = unified.deal(secret, 2, 5, f, _rand)
+    rejoined = unified.rejoin_share(tr, shares[1:4], 1, f)
+    assert rejoined[0] == 1
+    assert unified.verify_share(rejoined, tr, f)
+    assert unified.combine(tr, [rejoined] + shares[2:4], field=f) == secret
+    bad = [(x, s + 1, r) for x, s, r in shares[1:4]]
+    raises(ValueError, unified.rejoin_share, tr, bad, 1, f)
+    raises(ValueError, unified.rejoin_share, tr, shares[:3], 2, f)
+    raises(ValueError, unified.rejoin_share, tr, shares[1:3], 1, f)
+    raises(ValueError, unified.rejoin_share, tr, shares[1:4], 254, f)
+
+
+def test_unified_change_threshold():
+    f = default_field()
+    secret = 999
+    shares, _keys, tr = unified.deal(secret, 2, 5, f, _rand)
+    ns, keys2, ntr = unified.change_threshold(shares, tr, 3, 9, f, _rand)
+    assert unified.verify_transcript(ntr, f)
+    assert ntr['threshold'] == 3 and ntr['n'] == 9
+    assert unified.combine(ntr, ns[:4], mac_keys=keys2, field=f) == secret
+    raises(ValueError, unified.combine, ntr, ns[:3], mac_keys=keys2, field=f)
+    bad = [(x, s + 1, r) for x, s, r in shares]
+    raises(ValueError, unified.change_threshold, bad, tr, 3, 9, f, _rand)
+    raises(ValueError, unified.change_threshold, shares[:2], tr, 3, 9, f,
+           _rand)
+
+
+def test_unified_threshold_sign_invalid_signer():
+    f = default_field()
+    msg = b"release vote"
+    x_shares, _xk, xtr = unified.deal(987, 2, 5, f, _rand)
+    k_shares, _kk, ktr = unified.deal(12345, 2, 5, f, _rand)
+    corrupt = [(x, s + 1, r) for x, s, r in x_shares if x == 2]
+    bad_set = [sh if sh[0] != 2 else corrupt[0] for sh in x_shares]
+    raises(ValueError, unified.threshold_sign, msg, xtr, bad_set, ktr,
+           k_shares, [1, 2, 3], f)
+    R, z, Y, detail = unified.threshold_sign(msg, xtr, bad_set, ktr, k_shares,
+                                             [1, 2, 3, 4], f,
+                                             drop_invalid=True)
+    assert detail['rejected'] == [2]
+    assert 2 not in detail['partials']
+    assert unified.verify_signature(msg, R, z, Y, f)
+    missing = k_shares[:2]
+    raises(ValueError, unified.threshold_sign, msg, xtr, x_shares, ktr,
+           missing, [1, 2, 3], f, drop_invalid=True)
 
 
 def test_unified_pok_hygiene():

@@ -1,8 +1,8 @@
 # The Unified Scheme (U-SSS) — design, improvements, assumptions, implementation
 
 This document is the in-depth writeup of the project's centerpiece variation:
-**the unified scheme v2** in `shamir/unified.py` (~1780 lines, pure stdlib).
-It is one (t+1)-of-n secret-sharing construction over a 512-bit safe-prime
+**the unified scheme v4** in `shamir/unified.py` (~2000 lines, pure stdlib).
+It is one (t+1)-of-n secret-sharing construction over a 2048-bit safe-prime
 field that absorbs the entire verifiable-secret-sharing lineage into a single
 share format `(x, s_i, r_i)`, a single transcript format, and one end-to-end
 verification pipeline.
@@ -23,11 +23,11 @@ API reference.
 | | |
 |---|---|
 | Module | `shamir/unified.py` |
-| Scheme tag | `"unified-v2"` (`_SCHEME`); note the bundle *container* format is independently `"unified-v3"` (`_BUNDLE_FORMAT`) — the two version counters are separate (see §6.1) |
+| Scheme tag | `"unified-v4"` (`_SCHEME`); the bundle *container* format is also `"unified-v4"` (`_BUNDLE_FORMAT`) — both counters moved together when the v4 Fiat-Shamir statement binding changed the challenge bytes (see §6.1) |
 | Share | `(x, s_i, r_i)` — two field elements: the Shamir value *and* a Pedersen masking value |
-| Transcript | public dict: scheme, 16-byte session, threshold, n, secrets, commitments, digest + blinder, Schnorr PoK, MAC tags |
+| Transcript | public dict: scheme, 16-byte session, threshold, n, secrets, commitments, Schnorr PoK, MAC tags |
 | Field | safe prime p = 2q+1, 2048-bit (512-bit group retained as `insecure_test_field()` for tests); share arithmetic in **Z_q** (deliberately), commitment arithmetic in the order-q subgroup of Z_p\* |
-| Digest point | x = 254 (SLIP-0039 convention, `_DIGEST_INDEX`) |
+| Digest point | x = 254 (SLIP-0039 convention, `_DIGEST_INDEX`); no polynomial evaluation is ever published |
 | Sibling modules (not merged) | `pvss.py` (recipient privacy), `gf256.py` (GF(2^8) field), `hierarchical.py` (Birkhoff-derivative hierarchies, plain and committed), `weighted.py` (standalone weighted scheme) |
 
 The design goal, restated: a dealer deals once, publicly posts everything
@@ -43,8 +43,8 @@ publicly checkable against the commitments.
 
 ### 2.1 The field (`shamir/gf.py`)
 
-- Fixed 512-bit safe prime `p = 2q + 1` (both prime, tested at import time in
-  `default_field()`).
+- Fixed 2048-bit safe prime `p = 2q + 1` (both prime, tested at import time in
+  `default_field()`; the old 512-bit group is `insecure_test_field()`).
 - `g = 2^2 = 4`: a quadratic residue, hence of exact order q in Z_p\*.
 - `h = hash_to_subgroup(p, q, seed)`: the seed is hashed and squared *into*
   the order-q subgroup, so h is publicly recomputable but its discrete log
@@ -96,11 +96,10 @@ R(x) = b_0 + b_1 x + ... + b_t x^t      (the masking polynomial, fully random)
 
 ```python
 {
-  "scheme": "unified-v2",
+  "scheme": "unified-v4",
   "session": 16 random bytes,
   "threshold": t, "n": n, "secrets": p (number of packed secrets),
   "commitments": [C_0 .. C_t],
-  "digest": P(254), "digest_blinder": R(254),
   "proof": {"T", "challenge", "za", "zb", "entries": [...]} or None,
   "mac_tags": {(i,j): tag},            # dealer-epoch only
   "weights": [...]                      # only for deal_weighted
@@ -108,9 +107,10 @@ R(x) = b_0 + b_1 x + ... + b_t x^t      (the masking polynomial, fully random)
 ```
 
 Everything is public data. `verify_transcript` (unified.py:515) checks
-structure, subgroup membership of every commitment, the digest relation, and
-(if present) every PoK entry — the transcript is the *certificate* of the
-deal that any party can re-check.
+structure, subgroup membership of every commitment, and (if present) every
+PoK entry — the transcript is the *certificate* of the deal that any party
+can re-check. No polynomial evaluation is published (the v2-era
+`digest`/`digest_blinder` fields are gone; see §2.2).
 
 ---
 
@@ -288,8 +288,9 @@ for a *linear combination of deals nobody dealt* is derived publicly.
 
 `seal`/`seal_bytes` produce one JSON-serializable dict: the transcript
 (hex), session-bound checksummed share blobs for every holder
-(`SSSU` magic, version, width, x, session, SHA-256 checksum), optionally the
-MAC keys, and — new this session — the **field lock** (§6.3). `unseal` runs
+(`SSSU` magic, version 0x02, 2-byte width, x, session, SHA-256 checksum),
+optionally the MAC keys, and — new this session — the **field lock**
+(§6.3). `unseal` runs
 the whole validation pipeline on the way back: format, transcript public
 verification, every blob's checksum + session binding, then the full combine
 pipeline with MAC acceptance and digest screen. Cross-session mixing,
@@ -297,11 +298,13 @@ corrupted blobs and swapped transcripts fail loudly. `secret_kind` (int vs
 bytes) is explicit so a bundle cannot be unsealed through the wrong path.
 
 **Versioning note:** the scheme tag and the bundle format are versioned
-independently. The protocol is `"unified-v2"` (`_SCHEME`, checked by
-`verify_transcript`), while the JSON bundle container is `"unified-v3"`
-(`_BUNDLE_FORMAT`, checked by `unseal`/`unseal_bytes`) — the bundle format
-moved to v3 to carry the field locks and `weights` additions while the
-scheme itself stayed at v2. There is no "unified-v3 scheme".
+together. The protocol is `"unified-v4"` (`_SCHEME`, checked by
+`verify_transcript`), and the JSON bundle container is also `"unified-v4"`
+(`_BUNDLE_FORMAT`, checked by `unseal`/`unseal_bytes`). v4 changed the
+Fiat-Shamir challenges of the per-coefficient PoK, the share-holding proofs
+and the possession proofs to bind the full commitment vector (the statement),
+so both counters moved at once: a v3-era bundle is rejected as an unknown
+format rather than failing a confusing proof check.
 
 ### 6.2 Domain separation (unified.py:119-124)
 
@@ -309,7 +312,9 @@ Six distinct Fiat-Shamir/derivation domains keep every hash binding to its
 role: `pkt pok` (legacy dealer PoK), `coeff-pok` (per-coefficient),
 `share-pok` (prove_share), `key` (AEAD key derivation), `aead` (keystream +
 HMAC), `threshold-schnorr` (signatures). Every challenge binds the session,
-and coefficient/signature challenges additionally bind their index / (R, Y).
+and — since v4 — every PoK challenge also binds the full commitment vector
+(the statement), with coefficient challenges additionally binding their
+index and signature challenges binding (R, Y).
 
 ### 6.3 Field locks (unified.py:1618-1635)
 
@@ -405,7 +410,7 @@ computational, `[STANDARD]` textbook result.
 3. **Computational binding (DLP)** — public verification of commitments is
    computational; information-theoretic binding with public verification is
    impossible. All share/commitment binding rows are `[COMP]` on the
-   512-bit safe prime (log_g h unknown, h derived from a public SHA-256 seed).
+   2048-bit safe prime (log_g h unknown, h hashed into the subgroup).
 4. **Cost rows** — 2x share size and exponentiation-heavy verification are
    the deliberate price.
 
@@ -449,10 +454,11 @@ conformance tests, no constant-time engineering.
 | Seal / unseal / bytes variants | :1694-1781 |
 | Field, safe prime, generators | `shamir/gf.py` (h-heavy) |
 
-Status: `python tests/test_all.py` → 86/86 passing, including the property
-fuzz (`test_unified_property_fuzz`), corruption tests, and the threshold-sign
-regression tests. No lint/typecheck tooling configured — verification is
-`py_compile` + the test runner.
+Status: `python tests/test_all.py` → 101/101 passing, including the property
+fuzz (`test_unified_property_fuzz`), corruption tests, threshold-sign
+regression tests, and production-field seal/unseal
+(`test_unified_seal_on_production_field`). No lint/typecheck tooling
+configured — verification is `py_compile` + the test runner.
 
 ---
 
