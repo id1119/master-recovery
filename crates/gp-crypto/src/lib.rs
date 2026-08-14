@@ -23,6 +23,14 @@ use zeroize::{Zeroize, Zeroizing};
 
 pub const XWING_PUBLIC_KEY_LEN: usize = 1216;
 pub const XWING_CIPHERTEXT_LEN: usize = 1120;
+/// The authoritative protocol shares only 256-bit `A` and `DEK` values.
+pub const SHAMIR_SECRET_LEN: usize = 32;
+/// `blahaj` encodes a share as one nonzero GF(256) index plus the secret-length payload.
+pub const SHAMIR_SHARE_LEN: usize = SHAMIR_SECRET_LEN + 1;
+/// GF(256) provides 255 nonzero evaluation points.
+pub const SHAMIR_MAX_SHARES: u16 = 255;
+const SHAMIR_INDEX_WORDS: usize = 4;
+const SHAMIR_INDEX_BITS_PER_WORD: usize = 64;
 pub type SecretVec = Zeroizing<Vec<u8>>;
 
 #[derive(Debug, thiserror::Error)]
@@ -31,10 +39,14 @@ pub enum CryptoError {
     Authentication,
     #[error("invalid threshold parameters")]
     InvalidThreshold,
+    #[error("Shamir secrets must be exactly 32 bytes")]
+    InvalidSecretLength,
     #[error("not enough valid shares")]
     InsufficientShares,
     #[error("invalid share encoding")]
     InvalidShare,
+    #[error("duplicate Shamir share index")]
+    DuplicateShare,
     #[error("invalid erasure fragment set")]
     InvalidFragments,
     #[error("invalid signature or public key")]
@@ -127,7 +139,10 @@ pub fn split_secret(
     total: u16,
     seed: Id32,
 ) -> Result<Vec<SecretVec>, CryptoError> {
-    if threshold == 0 || threshold > total || total > 255 {
+    if secret.len() != SHAMIR_SECRET_LEN {
+        return Err(CryptoError::InvalidSecretLength);
+    }
+    if threshold == 0 || threshold > total || total > SHAMIR_MAX_SHARES {
         return Err(CryptoError::InvalidThreshold);
     }
     let scheme = Sharks(threshold as u8);
@@ -143,17 +158,40 @@ pub fn recover_secret<T: AsRef<[u8]>>(
     shares: &[T],
     threshold: u16,
 ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    if threshold == 0 || threshold > SHAMIR_MAX_SHARES {
+        return Err(CryptoError::InvalidThreshold);
+    }
     if shares.len() < threshold as usize {
         return Err(CryptoError::InsufficientShares);
     }
-    let decoded: Vec<Share> = shares
-        .iter()
-        .map(|share| Share::try_from(share.as_ref()).map_err(|_| CryptoError::InvalidShare))
-        .collect::<Result<_, _>>()?;
-    Sharks(threshold as u8)
-        .recover(&decoded)
-        .map(Zeroizing::new)
-        .map_err(|_| CryptoError::InsufficientShares)
+    if shares.len() > usize::from(SHAMIR_MAX_SHARES) {
+        return Err(CryptoError::InvalidShare);
+    }
+
+    let mut seen_indices = [0_u64; SHAMIR_INDEX_WORDS];
+    let mut decoded = Vec::with_capacity(shares.len());
+    for share in shares {
+        let encoded = share.as_ref();
+        if encoded.len() != SHAMIR_SHARE_LEN || encoded[0] == 0 {
+            return Err(CryptoError::InvalidShare);
+        }
+        let index = usize::from(encoded[0]);
+        let word = index / SHAMIR_INDEX_BITS_PER_WORD;
+        let mask = 1_u64 << (index % SHAMIR_INDEX_BITS_PER_WORD);
+        if seen_indices[word] & mask != 0 {
+            return Err(CryptoError::DuplicateShare);
+        }
+        seen_indices[word] |= mask;
+        decoded.push(Share::try_from(encoded).map_err(|_| CryptoError::InvalidShare)?);
+    }
+
+    let recovered = Sharks(threshold as u8)
+        .recover(decoded.iter())
+        .map_err(|_| CryptoError::InvalidShare)?;
+    if recovered.len() != SHAMIR_SECRET_LEN {
+        return Err(CryptoError::InvalidShare);
+    }
+    Ok(Zeroizing::new(recovered))
 }
 
 pub fn erasure_encode(
@@ -340,6 +378,12 @@ pub fn zeroize_id(value: &mut Id32) {
 mod tests {
     use super::*;
 
+    fn seed(counter: u16) -> Id32 {
+        let mut value = [0_u8; 32];
+        value[..2].copy_from_slice(&counter.to_be_bytes());
+        value
+    }
+
     #[test]
     fn shamir_threshold_round_trip_and_insufficient_failure() {
         let secret = [7_u8; 32];
@@ -367,6 +411,176 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn every_default_signer_subset_reconstructs() {
+        let secret = [0x21; SHAMIR_SECRET_LEN];
+        let shares = split_secret(&secret, 2, 3, [0x31; 32]).unwrap();
+        for first in 0..2 {
+            for second in (first + 1)..3 {
+                assert_eq!(
+                    &*recover_secret(&[&shares[first], &shares[second]], 2).unwrap(),
+                    &secret
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_default_guardian_subset_reconstructs() {
+        let secret = [0x41; SHAMIR_SECRET_LEN];
+        let shares = split_secret(&secret, 5, 8, [0x51; 32]).unwrap();
+        for first in 0..4 {
+            for second in (first + 1)..5 {
+                for third in (second + 1)..6 {
+                    for fourth in (third + 1)..7 {
+                        for fifth in (fourth + 1)..8 {
+                            let subset = [
+                                &shares[first],
+                                &shares[second],
+                                &shares[third],
+                                &shares[fourth],
+                                &shares[fifth],
+                            ];
+                            assert_eq!(&*recover_secret(&subset, 5).unwrap(), &secret);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seeded_threshold_properties_hold_across_parameter_range() {
+        for total in 1..=12 {
+            for threshold in 1..=total {
+                let secret = [total as u8 ^ threshold as u8; SHAMIR_SECRET_LEN];
+                let shares =
+                    split_secret(&secret, threshold, total, seed(total * 16 + threshold)).unwrap();
+                assert_eq!(shares.len(), usize::from(total));
+                assert!(shares.iter().all(|share| share.len() == SHAMIR_SHARE_LEN));
+                assert_eq!(
+                    &*recover_secret(&shares[..usize::from(threshold)], threshold).unwrap(),
+                    &secret
+                );
+                if threshold > 1 {
+                    assert!(matches!(
+                        recover_secret(&shares[..usize::from(threshold - 1)], threshold),
+                        Err(CryptoError::InsufficientShares)
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seeded_generation_is_deterministic_and_seed_separated() {
+        let secret = [0x61; SHAMIR_SECRET_LEN];
+        let first = split_secret(&secret, 3, 5, [0x71; 32]).unwrap();
+        let replay = split_secret(&secret, 3, 5, [0x71; 32]).unwrap();
+        let independent = split_secret(&secret, 3, 5, [0x72; 32]).unwrap();
+        assert_eq!(first, replay);
+        assert_ne!(first, independent);
+        assert_eq!(&*recover_secret(&independent[..3], 3).unwrap(), &secret);
+    }
+
+    #[test]
+    fn unbiased_coefficient_regression_allows_zero_coefficients() {
+        let secret = [0xa5; SHAMIR_SECRET_LEN];
+        let found_zero_slope = (0..1024).any(|counter| {
+            let shares = split_secret(&secret, 2, 2, seed(counter)).unwrap();
+            shares[0][1..]
+                .iter()
+                .zip(&shares[1][1..])
+                .any(|(first, second)| first == second)
+        });
+        assert!(
+            found_zero_slope,
+            "a 2-of-n polynomial must permit a uniformly sampled zero slope"
+        );
+    }
+
+    #[test]
+    fn shamir_rejects_invalid_parameters_and_encodings() {
+        let secret = [0x81; SHAMIR_SECRET_LEN];
+        let shares = split_secret(&secret, 2, 3, [0x91; 32]).unwrap();
+        let no_shares: Vec<Vec<u8>> = Vec::new();
+
+        assert!(matches!(
+            split_secret(&secret, 0, 3, [0; 32]),
+            Err(CryptoError::InvalidThreshold)
+        ));
+        assert!(matches!(
+            split_secret(&secret, 2, 256, [0; 32]),
+            Err(CryptoError::InvalidThreshold)
+        ));
+        assert!(matches!(
+            split_secret(&secret[..31], 2, 3, [0; 32]),
+            Err(CryptoError::InvalidSecretLength)
+        ));
+        assert!(matches!(
+            recover_secret(&no_shares, 0),
+            Err(CryptoError::InvalidThreshold)
+        ));
+        assert!(matches!(
+            recover_secret(&no_shares, 1),
+            Err(CryptoError::InsufficientShares)
+        ));
+        assert!(matches!(
+            recover_secret(&no_shares, 256),
+            Err(CryptoError::InvalidThreshold)
+        ));
+
+        let duplicate = [&shares[0], &shares[0]];
+        assert!(matches!(
+            recover_secret(&duplicate, 2),
+            Err(CryptoError::DuplicateShare)
+        ));
+
+        let mut zero_index = shares[0].to_vec();
+        zero_index[0] = 0;
+        assert!(matches!(
+            recover_secret(&[zero_index, shares[1].to_vec()], 2),
+            Err(CryptoError::InvalidShare)
+        ));
+        assert!(matches!(
+            recover_secret(
+                &[
+                    shares[0][..SHAMIR_SHARE_LEN - 1].to_vec(),
+                    shares[1].to_vec()
+                ],
+                2
+            ),
+            Err(CryptoError::InvalidShare)
+        ));
+
+        let too_many = vec![shares[0].to_vec(); usize::from(SHAMIR_MAX_SHARES) + 1];
+        assert!(matches!(
+            recover_secret(&too_many, 2),
+            Err(CryptoError::InvalidShare)
+        ));
+    }
+
+    #[test]
+    fn shamir_supports_the_maximum_distinct_share_count() {
+        let secret = [0xb1; SHAMIR_SECRET_LEN];
+        let shares = split_secret(&secret, 2, SHAMIR_MAX_SHARES, [0xc1; 32]).unwrap();
+        assert_eq!(shares.len(), usize::from(SHAMIR_MAX_SHARES));
+        assert_eq!(shares.first().unwrap()[0], 1);
+        assert_eq!(shares.last().unwrap()[0], u8::MAX);
+        assert_eq!(&*recover_secret(&shares[..2], 2).unwrap(), &secret);
+        assert_eq!(
+            &*recover_secret(&[&shares[1], &shares[0]], 2).unwrap(),
+            &secret
+        );
+
+        let all_required =
+            split_secret(&secret, SHAMIR_MAX_SHARES, SHAMIR_MAX_SHARES, [0xd1; 32]).unwrap();
+        assert_eq!(
+            &*recover_secret(&all_required, SHAMIR_MAX_SHARES).unwrap(),
+            &secret
+        );
     }
 
     #[test]

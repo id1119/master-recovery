@@ -21,5 +21,12 @@ thiserror.workspace = true
 x-wing.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "shamir"
+harness = false
+
 [lints]
 workspace = true

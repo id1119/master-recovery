@@ -108,7 +108,11 @@ Use `0` for a guardian/signer option to disable that adversarial toggle.
 
 - XChaCha20-Poly1305 payload encryption and guardian-share wrapping.
 - Maintained `blahaj` Shamir secret sharing for `A` and `DEK`; the vulnerable,
-  unpatched `sharks` dependency is not used.
+  unpatched `sharks` dependency is not used. The wrapper enforces the protocol's
+  32-byte key/share profile, rejects malformed or duplicate shares before
+  reconstruction, and keeps share buffers zeroizing. See
+  [`SHAMIR_AUDIT.md`](SHAMIR_AUDIT.md) for the historical compatibility matrix,
+  test evidence, benchmarks, and exact non-claims.
 - Reed–Solomon erasure coding over encrypted payload bytes.
 - SHA-256 commitments and Merkle membership proofs.
 - Canonical length-prefixed signature transcripts with domain separation.

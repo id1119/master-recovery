@@ -670,7 +670,7 @@ fn setup_world(
         signers.push(SignerState {
             signer_id: index,
             mailbox: opaque_mailbox(rng),
-            authorization_share: a_shares[usize::from(index - 1)].to_vec(),
+            authorization_share: a_shares[usize::from(index - 1)].clone(),
             signing_seed: seed,
             signing_public_key: public,
             membership_proof: vec![],
@@ -1045,11 +1045,7 @@ fn validate_approvals_and_reconstruct(
         )?;
         let context =
             gp_wire::recipient_share_context(&contribution.request, contribution.signer_id)?;
-        shares.push(
-            recipient
-                .open(&contribution.encrypted_a_share, &context)?
-                .to_vec(),
-        );
+        shares.push(recipient.open(&contribution.encrypted_a_share, &context)?);
     }
     recover_secret(&shares, capsule.signer_threshold).map_err(Into::into)
 }
@@ -1255,7 +1251,7 @@ fn validate_guardian_contribution(
     descriptor: &RecoveryDescriptor,
     request: &RecoveryRequest,
     authorization_key: &[u8],
-) -> Result<Vec<u8>, SimError> {
+) -> Result<SecretVec, SimError> {
     let request_digest = sha256(&gp_wire::request_digest_preimage(request)?);
     if contribution.config_id != request.config_id
         || contribution.protocol_version != PROTOCOL_VERSION
@@ -1304,8 +1300,7 @@ fn validate_guardian_contribution(
         )?,
     );
     zeroize_id(&mut key);
-    let plaintext = plaintext?;
-    Ok(plaintext.to_vec())
+    Ok(plaintext?)
 }
 
 struct DemoOutcome {

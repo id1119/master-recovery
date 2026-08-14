@@ -95,7 +95,7 @@ pub fn create_setup(
         signers.push(SignerState {
             signer_id,
             mailbox: mailbox.clone(),
-            authorization_share: a_shares[offset].to_vec(),
+            authorization_share: a_shares[offset].clone(),
             signing_seed: seed,
             signing_public_key: public,
             membership_proof: vec![],
@@ -407,17 +407,10 @@ pub fn reconstruct_a(
             )?,
             &contribution.signer_signature,
         )?;
-        shares.push(
-            recipient
-                .open(
-                    &contribution.encrypted_a_share,
-                    &gp_wire::recipient_share_context(
-                        &certificate.request,
-                        contribution.signer_id,
-                    )?,
-                )?
-                .to_vec(),
-        );
+        shares.push(recipient.open(
+            &contribution.encrypted_a_share,
+            &gp_wire::recipient_share_context(&certificate.request, contribution.signer_id)?,
+        )?);
     }
     if shares.len() < usize::from(capsule.signer_threshold) {
         bail!("signer threshold not reached");
@@ -595,7 +588,7 @@ pub fn validate_guardian_contribution(
     descriptor: &RecoveryDescriptor,
     request: &RecoveryRequest,
     authorization_key: &[u8],
-) -> Result<Vec<u8>> {
+) -> Result<SecretVec> {
     let digest = sha256(&gp_wire::request_digest_preimage(request)?);
     if contribution.protocol_version != PROTOCOL_VERSION
         || contribution.config_id != request.config_id
@@ -644,14 +637,14 @@ pub fn validate_guardian_contribution(
         )?,
     );
     zeroize_id(&mut key);
-    Ok(share?.to_vec())
+    Ok(share?)
 }
 
 pub fn reconstruct_payload(
     capsule: &ConfigCapsule,
     descriptor: &RecoveryDescriptor,
     fragments: &[(u16, Vec<u8>)],
-    dek_shares: &[Vec<u8>],
+    dek_shares: &[SecretVec],
 ) -> Result<SecretVec> {
     let dek = recover_secret(dek_shares, capsule.guardian_threshold)?;
     let ciphertext = erasure_reconstruct(

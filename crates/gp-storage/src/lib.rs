@@ -1,9 +1,13 @@
 //! Minimal in-memory storage adapters used by both the simulator and tests.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use gp_types::{ConfigCapsule, GuardianRecord, Id32, SignerPolicy};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
 pub enum StorageError {
@@ -17,17 +21,34 @@ pub enum StorageError {
     Replay,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SignerState {
     pub signer_id: u16,
     pub mailbox: String,
-    pub authorization_share: Vec<u8>,
+    pub authorization_share: Zeroizing<Vec<u8>>,
     pub signing_seed: Id32,
     pub signing_public_key: [u8; 32],
     pub membership_proof: Vec<u8>,
     pub policy: SignerPolicy,
     pub seen_requests: BTreeMap<String, Id32>,
     pub seen_nonces: BTreeSet<Id32>,
+}
+
+impl fmt::Debug for SignerState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SignerState")
+            .field("signer_id", &self.signer_id)
+            .field("mailbox", &self.mailbox)
+            .field("authorization_share", &"[REDACTED]")
+            .field("signing_seed", &"[REDACTED]")
+            .field("signing_public_key", &self.signing_public_key)
+            .field("membership_proof", &self.membership_proof)
+            .field("policy", &self.policy)
+            .field("seen_requests", &self.seen_requests)
+            .field("seen_nonces", &self.seen_nonces)
+            .finish()
+    }
 }
 
 impl SignerState {
@@ -115,7 +136,7 @@ mod tests {
         let mut signer = SignerState {
             signer_id: 1,
             mailbox: "opaque".into(),
-            authorization_share: vec![1],
+            authorization_share: Zeroizing::new(vec![1]),
             signing_seed: [2; 32],
             signing_public_key: [4; 32],
             membership_proof: vec![],
@@ -139,5 +160,54 @@ mod tests {
             signer.observe_request([5; 32], 1, [13; 32], [14; 32], [15; 32]),
             Err(StorageError::WrongConfiguration)
         );
+    }
+
+    #[test]
+    fn signer_debug_output_redacts_secret_material() {
+        let signer = SignerState {
+            signer_id: 1,
+            mailbox: "opaque".into(),
+            authorization_share: Zeroizing::new(vec![0xa5; 33]),
+            signing_seed: [0xb6; 32],
+            signing_public_key: [0xc7; 32],
+            membership_proof: vec![],
+            policy: SignerPolicy {
+                config_id: [0xd8; 32],
+                config_version: 1,
+                signer_set_commitment: [0xe9; 32],
+                signer_threshold: 1,
+            },
+            seen_requests: BTreeMap::new(),
+            seen_nonces: BTreeSet::new(),
+        };
+
+        let debug = format!("{signer:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("165, 165"));
+        assert!(!debug.contains("182, 182"));
+    }
+
+    #[test]
+    fn zeroizing_signer_share_preserves_the_storage_format() {
+        let signer = SignerState {
+            signer_id: 1,
+            mailbox: "opaque".into(),
+            authorization_share: Zeroizing::new(vec![1, 2, 3]),
+            signing_seed: [4; 32],
+            signing_public_key: [5; 32],
+            membership_proof: vec![6],
+            policy: SignerPolicy {
+                config_id: [7; 32],
+                config_version: 1,
+                signer_set_commitment: [8; 32],
+                signer_threshold: 1,
+            },
+            seen_requests: BTreeMap::new(),
+            seen_nonces: BTreeSet::new(),
+        };
+
+        let encoded = serde_json::to_vec(&signer).unwrap();
+        let decoded: SignerState = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.authorization_share.as_slice(), [1, 2, 3]);
     }
 }
