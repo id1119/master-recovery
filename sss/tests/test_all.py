@@ -704,6 +704,7 @@ def test_unified_batch_verify():
             unified.batch_verify([share], tr, f)
     tampered = [(x, s + 1, r) for x, s, r in shares]
     assert not unified.batch_verify(tampered, tr, f)
+    assert not unified.batch_verify([shares[0], shares[0], shares[1]], tr, f)
     malformed = shares[:2] + [(0, 1, 1)] + shares[3:]
     assert not unified.batch_verify(malformed, tr, f)
     assert not unified.batch_verify([], tr, f)
@@ -922,6 +923,7 @@ def test_unified_weighted():
     assert unified.combine(tr, coalition, mac_keys=keys, field=f) == 777
     tampered = [(1, coalition[0][1] + 1, coalition[0][2])] + coalition[1:]
     assert unified.combine(tr, tampered, field=f) == 777
+    raises(ValueError, unified.change_threshold, all_sh, tr, 2, 5, f, _rand)
 
 
 def test_unified_weighted_seal():
@@ -974,6 +976,132 @@ def test_unified_distributed_corruption():
     assert not unified.verify_share((2, bad_share[0] + 1, bad_share[1]), tr, f)
 
 
+def test_unified_dkg_two_round_commit_public():
+    f = default_field()
+    qf = gf.GF(f.q)
+    session = unified.session_id()
+    public, private = unified._dkg_commit_round(5, 2, session, f, qf,
+                                                lambda: _rand() % qf.p)
+    assert sorted(public) == [1, 2, 3, 4, 5]
+    for dealer, pub in public.items():
+        assert set(pub) == {"commitments", "pok", "session"}
+        assert len(pub["commitments"]) == 3
+        for c in pub["commitments"]:
+            f._check_subgroup(c)
+        assert len(pub["pok"]["entries"]) == 3
+        assert pub["session"] == session + bytes([dealer])
+    assert sorted(private) == [1, 2, 3, 4, 5]
+    result = unified._dkg_reveal_round(public, private, 2, 5, session, f, qf,
+                                       lambda: _rand() % qf.p)
+    tr = result["transcript"]
+    assert unified.verify_transcript(tr, f)
+    assert result["qual"] == [1, 2, 3, 4, 5]
+    assert result["complaints"] == []
+    assert result["pok_failures"] == []
+
+
+def test_unified_dkg_late_swap():
+    f = default_field()
+    res = unified.distributed_run(5, 2, f, _rand, corrupt_switch={2})
+    assert 2 not in res['qual']
+    for r in range(1, 6):
+        assert (2, r) in res['complaints']
+    assert res['pok_failures'] == []
+    tr = res['transcript']
+    assert unified.verify_transcript(tr, f)
+    triples = [(r, res['shares'][r][0], res['shares'][r][1])
+               for r in res['qual']]
+    secret = unified.combine(tr, triples[:3], field=f)
+    assert pow(f.g, secret, f.p) == res['public_key']
+    assert unified.batch_verify([(r, s, rv) for r, (s, rv)
+                                 in res['shares'].items()], tr, field=f)
+
+
+def test_unified_dkg_signature_fuzz():
+    f = default_field()
+    rng = random.Random(99)
+    for _ in range(12):
+        threshold = rng.randrange(1, 4)
+        n = rng.randrange(threshold + 1, 7)
+        key = unified.distributed_run(n, threshold, f)
+        nonce = unified.distributed_run(n, threshold, f)
+        tr = key["transcript"]
+        ktr = nonce["transcript"]
+        xtriples = [(i, *key["shares"][i]) for i in range(1, n + 1)]
+        ktriples = [(i, *nonce["shares"][i]) for i in range(1, n + 1)]
+        msg = ("release-%d-%d" % (threshold, n)).encode()
+        signers = rng.sample(range(1, n + 1), threshold + 1)
+        R, z, Y, detail = unified.threshold_sign(
+            msg, tr, xtriples, ktr, ktriples, signers, f)
+        assert unified.verify_signature(msg, R, z, Y, f)
+        assert not unified.verify_signature(b"other", R, z, Y, f)
+        R2, z2, Y2, d2 = unified.threshold_sign(
+            msg, tr, xtriples, ktr, ktriples, signers, f,
+            partials=detail["partials"])
+        assert (R2, z2, Y2) == (R, z, Y)
+        bad = dict(detail["partials"])
+        victim = signers[rng.randrange(len(signers))]
+        bad[victim] = (bad[victim] + 1) % f.q
+        raises(ValueError, unified.threshold_sign, msg, tr, xtriples, ktr,
+               ktriples, signers, f, partials=bad)
+        if threshold + 2 <= n:
+            other_set = rng.sample(range(1, n + 1), threshold + 1)
+            if set(other_set) != set(signers):
+                raises(ValueError, unified.threshold_sign, msg, tr, xtriples,
+                       ktr, ktriples, other_set, f,
+                       partials=detail["partials"])
+
+
+def test_unified_recovery_lifecycle():
+    """Protocol-shaped end-to-end: guardian shares + signer approval.
+
+    Mirrors the master-recovery flow: a secret is sealed into guardian
+    bundles; signers hold a separate dealer-free sharing (A); a release
+    requires a threshold Schnorr approval over the exact release message;
+    guardians then unseal with maintained (refreshed / rejoined /
+    threshold-changed) shares.  Every layer must survive, and tampering
+    must fail closed.
+    """
+    f = default_field()
+    secret = 31337
+    bundle = unified.seal(secret, 2, 5, f, _rand)
+    g_shares, g_keys, g_tr = unified.deal(secret, 2, 5, f, _rand)
+    a_run = unified.distributed_run(5, 2, f)
+    a_tr = a_run["transcript"]
+    a_shares = [(i, *a_run["shares"][i]) for i in range(1, 6)]
+    msg = b"release cert v7"
+    nonce_run = unified.distributed_run(5, 2, f)
+    n_tr = nonce_run["transcript"]
+    n_shares = [(i, *nonce_run["shares"][i]) for i in range(1, 6)]
+    R, z, Y, detail = unified.threshold_sign(
+        msg, a_tr, a_shares, n_tr, n_shares, [1, 2, 3], f)
+    assert unified.verify_signature(msg, R, z, Y, f)
+    assert Y == a_run["public_key"]
+    rng = random.Random(55)
+    refreshed = []
+    rtr = None
+    for i in range(1, 6):
+        rng = random.Random(55)
+        ns, rtr, _info = unified.refresh(
+            next(sh for sh in g_shares if sh[0] == i), g_tr, f,
+            lambda: rng.randrange(1 << 520))
+        refreshed.append(ns)
+    assert unified.verify_transcript(rtr, f)
+    assert unified.combine(rtr, refreshed[:3], field=f) == secret
+    rejoined = unified.rejoin_share(rtr, refreshed[1:4], 1, f)
+    assert unified.verify_share(rejoined, rtr, f)
+    changed, c_keys, c_tr = unified.change_threshold(
+        [rejoined] + refreshed[1:4], rtr, 3, 7, f, _rand)
+    assert unified.verify_transcript(c_tr, f)
+    assert unified.combine(c_tr, changed[:4], mac_keys=c_keys,
+                           field=f) == secret
+    blobs = [s["blob"] for s in bundle["shares"]]
+    assert unified.unseal(bundle, blobs[:3], field=f) == secret
+    tampered = list(blobs)
+    tampered[1] = tampered[1][:-1] + ('0' if tampered[1][-1] != '0' else '1')
+    raises(ValueError, unified.unseal, bundle, tampered[:3], field=f)
+
+
 def test_hierarchical_committed():
     f = default_field()
     levels = [1, 2, 3]
@@ -1005,11 +1133,17 @@ def test_unified_threshold_sign():
     assert unified.verify_signature(msg, R, z, Y, f)
     assert not unified.verify_signature(b"other message", R, z, Y, f)
     assert not unified.verify_signature(msg, R, (z + 1) % f.q, Y, f)
+    assert not unified.verify_signature(msg, R, z, (Y + 1) % f.p, f)
+    assert not unified.verify_signature(msg, f.p - 1, z, Y, f)
+    assert not unified.verify_signature(msg, R, z, f.p - 1, f)
+    assert not unified.verify_signature(msg, R, f.p + 5, Y, f)
     R2, z2, _Y, _d = unified.threshold_sign(
         msg, xtr, x_shares, ktr, k_shares, [2, 3, 4], f)
     assert unified.verify_signature(msg, R2, z2, Y, f)
     raises(ValueError, unified.threshold_sign,
            msg, xtr, x_shares, ktr, k_shares, [1, 2], f)
+    raises(ValueError, unified.threshold_sign,
+           msg, xtr, x_shares, ktr, k_shares, [1, 1, 2, 3], f)
     raises(ValueError, lambda: unified.threshold_sign(
         msg, xtr, x_shares, ktr, k_shares[:3], [1, 2, 4], f))
 
@@ -1029,6 +1163,52 @@ def test_unified_threshold_sign_dealer_free():
                                          [1, 2, 3], f)
     assert Y == key['public_key']
     assert unified.verify_signature(msg, R, z, Y, f)
+
+
+def test_unified_threshold_sign_partial_verification():
+    f = default_field()
+    msg = b"partial verification"
+    x_shares, _xk, xtr = unified.deal(987, 2, 5, f, _rand)
+    k_shares, _kk, ktr = unified.deal(12345, 2, 5, f, _rand)
+    R, z, Y, detail = unified.threshold_sign(
+        msg, xtr, x_shares, ktr, k_shares, [1, 2, 3, 4], f)
+    assert unified.verify_signature(msg, R, z, Y, f)
+    assert set(detail["publics"]) == {1, 2, 3, 4}
+    for r_i, y_i in detail["publics"].values():
+        f._check_subgroup(r_i)
+        f._check_subgroup(y_i)
+    good = detail["partials"]
+    R2, z2, Y2, d2 = unified.threshold_sign(
+        msg, xtr, x_shares, ktr, k_shares, [1, 2, 3, 4], f, partials=good)
+    assert (R2, z2, Y2) == (R, z, Y)
+    assert unified.verify_signature(msg, R2, z2, Y2, f)
+    bad = dict(good)
+    bad[2] = (bad[2] + 7) % f.q
+    for kwargs in ({}, {"drop_invalid": True}):
+        raises(ValueError, unified.threshold_sign, msg, xtr, x_shares, ktr,
+               k_shares, [1, 2, 3, 4], f, partials=bad, **kwargs)
+    R3, z3, Y3, d3 = unified.threshold_sign(
+        msg, xtr, x_shares, ktr, k_shares, [1, 3, 4], f)
+    assert unified.verify_signature(msg, R3, z3, Y3, f)
+    assert set(d3["partials"]) == {1, 3, 4}
+
+
+def test_unified_threshold_sign_replay_rejected():
+    f = default_field()
+    x_shares, _xk, xtr = unified.deal(987, 2, 5, f, _rand)
+    m1 = b"first release"
+    m2 = b"second release"
+    k_shares, _kk, ktr = unified.deal(12345, 2, 5, f, _rand)
+    _R1, _z1, Y, d1 = unified.threshold_sign(
+        m1, xtr, x_shares, ktr, k_shares, [1, 2, 3], f)
+    k_shares2, _kk2, ktr2 = unified.deal(54321, 2, 5, f, _rand)
+    R2, z2, Y2, _d2 = unified.threshold_sign(
+        m2, xtr, x_shares, ktr2, k_shares2, [1, 2, 3], f)
+    assert unified.verify_signature(m2, R2, z2, Y2, f)
+    assert Y == Y2
+    stale = d1["partials"]
+    raises(ValueError, unified.threshold_sign, m2, xtr, x_shares, ktr2,
+           k_shares2, [1, 2, 3], f, partials=stale)
 
 
 def test_unified_pok_challenge_binds_statement():
@@ -1089,6 +1269,58 @@ def test_unified_change_threshold():
     raises(ValueError, unified.change_threshold, bad, tr, 3, 9, f, _rand)
     raises(ValueError, unified.change_threshold, shares[:2], tr, 3, 9, f,
            _rand)
+
+
+def test_unified_change_threshold_multi_secret():
+    f = default_field()
+    secrets = [111, 222]
+    shares, _keys, tr = unified.deal_many(secrets, 2, 5, f, _rand)
+    ns, keys2, ntr = unified.change_threshold(shares, tr, 3, 8, f, _rand)
+    assert unified.verify_transcript(ntr, f)
+    assert ntr['secrets'] == 2
+    assert unified.combine_many(ntr, ns[:4], mac_keys=keys2,
+                                field=f) == secrets
+    bad = [(x, s + 1, r) for x, s, r in shares]
+    raises(ValueError, unified.change_threshold, bad, tr, 3, 8, f, _rand)
+    raises(ValueError, unified.combine, ntr, ns[:4], mac_keys=keys2, field=f)
+
+
+def test_unified_weighted_refresh_keeps_weights():
+    f = default_field()
+    groups, keys, tr = unified.deal_weighted(777, [1, 2, 2], 2, f, _rand)
+    sub = groups[1][0]
+    ns, ntr, _info = unified.refresh(sub, tr, f, _rand)
+    assert ntr['weights'] == [1, 2, 2]
+    assert unified.verify_transcript(ntr, f)
+    assert unified.verify_share(ns, ntr, f)
+    assert unified.verify_share(sub, tr, f)
+    assert not unified.verify_share(sub, ntr, f)
+
+
+def test_unified_deterministic_replay():
+    f = default_field()
+    real_session_id = unified.session_id
+    unified.session_id = lambda: b'\x00' * 16
+    try:
+
+        def run():
+            rng = random.Random(20260814)
+            rand = lambda: rng.randrange(1 << 520)
+            shares, keys, tr = unified.deal(999, 2, 5, f, rand)
+            k_shares, _kk, ktr = unified.deal(12345, 2, 5, f, rand)
+            R, z, Y, detail = unified.threshold_sign(
+                b'replay', tr, shares, ktr, k_shares, [1, 2, 3], f)
+            bundle = unified.seal(777, 2, 5, f, rand)
+            return (tr, shares, keys, ktr, R, z, Y, detail['c'], bundle)
+
+        a = run()
+        b = run()
+        assert a == b
+        assert unified.unseal(b[8],
+                              [s['blob'] for s in b[8]['shares']][:3],
+                              field=f) == 777
+    finally:
+        unified.session_id = real_session_id
 
 
 def test_unified_threshold_sign_invalid_signer():

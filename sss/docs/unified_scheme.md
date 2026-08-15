@@ -60,7 +60,7 @@ publicly checkable against the commitments.
   p-vs-q interpolation bug (documented in `vss.py`), and it is what makes the
   zero-knowledge claims *exact* rather than statistical (see §7).
 
-### 2.2 Deal-time structure (`_deal`, unified.py:237)
+### 2.2 Deal-time structure (`_deal`, unified.py:249)
 
 The dealer picks two polynomials of degree ≤ t over Z_q:
 
@@ -82,7 +82,7 @@ R(x) = b_0 + b_1 x + ... + b_t x^t      (the masking polynomial, fully random)
   Reconstruction is instead screened coefficient by coefficient against the
   commitments, which checks all t+1 coefficients rather than one evaluation.
 - **Per-coefficient Schnorr proofs of knowledge** (`_coeff_pok_entries`,
-  unified.py:213): one sigma-protocol entry per coefficient, proving knowledge
+  unified.py:225): one sigma-protocol entry per coefficient, proving knowledge
   of the opening `(a_j, b_j)` of *every* commitment — not just C_0. This is
   the FROST/Schoenmakers-practice contribution (see §3.2).
 - **Pairwise MACs** (Rabin-Ben-Or 1989): for every ordered pair (i,j), a fresh
@@ -106,7 +106,7 @@ R(x) = b_0 + b_1 x + ... + b_t x^t      (the masking polynomial, fully random)
 }
 ```
 
-Everything is public data. `verify_transcript` (unified.py:515) checks
+Everything is public data. `verify_transcript` (unified.py:567) checks
 structure, subgroup membership of every commitment, and (if present) every
 PoK entry — the transcript is the *certificate* of the deal that any party
 can re-check. No polynomial evaluation is published (the v2-era
@@ -139,7 +139,7 @@ polynomial to a dealer who knows its opening:
 - one Schnorr entry per index `j` in 0..t: `T = g^{ua} h^{ub}`,
   `challenge = H(coeff-pok domain ‖ session ‖ j ‖ T)`,
   `za = ua + c·a_j`, `zb = ub + c·b_j` (all mod q);
-- verified in `_pok_entries_ok` (unified.py:482) as
+- verified in `_pok_entries_ok` (unified.py:534) as
   `g^{za} h^{zb} == T · C_j^c`, with every T subgroup-checked;
 - the Fiat-Shamir challenge is index-bound, so entries cannot be reordered or
   swapped across coefficients; the legacy single-PoK layout still verifies
@@ -152,7 +152,7 @@ the "dealer only knows what it hashed" gap at setup time too.
 
 - The dealer-epoch keys give `_mac_ok` an exact per-share test: a forged tag
   succeeds with probability 1/q.
-- `_acceptance_set` (unified.py:675) implements the Cevallos–Fehr–Ostrovsky–
+- `_acceptance_set` (unified.py:864) implements the Cevallos–Fehr–Ostrovsky–
   Rabani *iterative acceptance graph*: a share survives only if it is
   certified by t+1 *surviving* players; removing losers repeats until stable.
   This beats the naive majority rule against colluding cheaters (a coalition
@@ -160,24 +160,26 @@ the "dealer only knows what it hashed" gap at setup time too.
 
 ### 3.4 Berlekamp–Welch — correction, not just detection (McEliece–Sarwate '81)
 
-`combine` (`_recover`, unified.py:698) runs the layered pipeline:
+`combine` (`_recover`, unified.py:920) runs the layered pipeline:
 
 1. commitment-verify every submitted share (drop failures);
 2. if MAC keys present, run the CFOR acceptance graph on the survivors;
 3. decode with Berlekamp–Welch (corrects up to `floor((n-t-1)/2)` corrupt
    s-values) when some shares fail verification but ≥ t+1 pass;
 4. plain Lagrange interpolation on the verified set as the cheap fallback;
-5. **digest screen**: the recovered polynomial must evaluate to the published
-   `P(254)` — wrong secrets and cross-session mixes are rejected at combine,
-   not silently returned.
+5. **commitment screen**: `_screen_against_commitments` re-checks the
+   recovered polynomial coefficient by coefficient against the Pedersen
+   commitments — wrong secrets and cross-session mixes are rejected at
+   combine, not silently returned. The transcript publishes *no* evaluation
+   of the secret polynomial (v4 removed the old published digest point).
 
-### 3.5 Session discipline + digest point (SLIP-0039 lineage)
+### 3.5 Session discipline (SLIP-0039 lineage)
 
 - Every transcript carries a fresh random 16-byte session.
 - Share *blobs* (seal bundles, §6.1) embed the session; `_decode_blob` rejects
-  blobs from any other session, and the digest relation is rechecked against
-  the commitments at both verify and combine time, so a transcript from one
-  deal cannot be mixed with shares from another.
+  blobs from any other session, and every recovered polynomial is screened
+  against the commitments at both verify and combine time, so a transcript
+  from one deal cannot be mixed with shares from another.
 
 ### 3.6 What is deliberately NOT merged here
 
@@ -193,7 +195,7 @@ simplicity are not chased inside the unified scheme; it is the
 
 ## 4. Lifecycle layers — the sharing outlives the dealer
 
-### 4.1 Refresh (`refresh`, unified.py:1379) — Herzberg et al. CRYPTO '95
+### 4.1 Refresh (`refresh`, unified.py:1749) — Herzberg et al. CRYPTO '95
 
 Every player deals a **zero-constant** Pedersen delta pair (c-poly, m-poly).
 Each recipient adds the others' evaluated deltas to its own share; the
@@ -207,16 +209,16 @@ cannot survive a refresh, authenticity moving to the Pedersen (computational)
 layer. This is the proactive-security primitive: an old share is useless
 against the refreshed one.
 
-### 4.2 Redistribution (`redistribute`, unified.py:1461) — Desmedt–Jarecki CRYPTO '93
+### 4.2 Redistribution (`redistribute`, unified.py:1819) — Desmedt–Jarecki CRYPTO '93
 
 Move the sharing to a different `(t', n')`. t+1 verified holders each deal a
 new polynomial whose constant term is their own share value; recipients
 combine the lambda-weighted evaluations. New commitments are derived *in the
-exponent* (`prod C_{i,j}^{λ_i}`) and the new digest point from the posted
-`(h_i(254), m_i(254))` values — no secret, and no one learns anyone's share.
-The new transcript carries the same session id, so the lineage is traceable.
+exponent* (`prod C_{i,j}^{λ_i}`) — no secret, and no one learns anyone's
+share. The new transcript carries the same session id, so the lineage is
+traceable.
 
-### 4.3 Share re-issuance (`derive_share`, unified.py:963)
+### 4.3 Share re-issuance (`derive_share`, unified.py:1173)
 
 Interpolate a fresh, commitment-checkable `(y, s_y, r_y)` at any new
 coordinate from t+1 verified shares — a new player joins with no dealer and
@@ -226,13 +228,13 @@ no secret exposure (Herzberg recovery adapted to triples).
 
 ## 5. Threshold crypto and dealer-free setup — never reconstruct
 
-### 5.1 Threshold exponentiation (`recover_exponent`, unified.py:1001) — Desmedt–Frankel CRYPTO '89
+### 5.1 Threshold exponentiation (`recover_exponent`, unified.py:1266) — Desmedt–Frankel CRYPTO '89
 
 `g^{s_i} = C_{x_i} / h^{r_i}` by the public r-binder, then Lagrange-combine in
 the exponent. The int secret never appears in memory. This is the base for
 the modular arithmetic that follows.
 
-### 5.2 Threshold Schnorr signatures (`threshold_sign`, unified.py:1054)
+### 5.2 Threshold Schnorr signatures (`threshold_sign`, unified.py:1316)
 
 Sign without reconstructing the key: `R = g^k` (nonce sharing, fresh per
 message), `c = H(m ‖ R ‖ Y)`, and each signer contributes
@@ -243,34 +245,48 @@ regression test). `verify_signature` is the textbook Schnorr check `g^z ==
 R·Y^c` with subgroup checks on R and Y. Protocol rule, documented in code:
 *never reuse a nonce sharing* — `z1 - z2 = (c1 - c2)·x` leaks the key.
 
-### 5.3 Dealer-free setup (`distributed_run`, unified.py:361) — Pedersen/GJKR-style DKG
+Every partial is independently verified before it is summed: from the
+transcripts, in the exponent only, the signer's public nonce commitment
+`R_i = g^k_i` and public key share `Y_i = g^x_i` are recovered, and the
+partial passes iff `g^z_i == R_i^λ_i · Y_i^(c·λ_i)`. A wrong partial — or a
+replayed one from an earlier message, since `c` binds `(m, R, Y)` — is
+computationally detected and attributed to its signer. Submitted partials
+are bound to the signer set's challenge, so an invalid one aborts the run
+(FROST restart discipline: replace the signer and re-run); `drop_invalid`
+only ever drops signers whose *shares* fail transcript verification.
 
-Every party deals a random unified polynomial (s + r sides), posts
-commitments, per-coefficient PoKs (under a per-dealer session
-`session + [dealer]`) and its digest point `(P_i(254), R_i(254))`. Every
-recipient verifies the received `(s, r)` pair against the commitments;
-complaints and PoK failures disqualify the dealer from QUAL. The group
-generates:
+### 5.3 Dealer-free setup (`distributed_run`, unified.py) — Pedersen/GJKR-style DKG, two rounds
+
+Every party deals a random unified polynomial (s + r sides). Round 1
+(commit) posts the Pedersen commitments and per-coefficient PoKs (under a
+per-dealer session `session + [dealer]`) — no shares yet. Round 2 (reveal)
+posts the `(s, r)` share pair for each recipient; every recipient verifies
+the pair against the round-1 commitments; complaints, PoK failures, and
+reveals that do not match their own commit disqualify the dealer from QUAL.
+The group generates:
 
 - shares = sums over QUAL per recipient,
-- transcript = summed commitments, summed digest/blinder (a *plain* unified
-  transcript),
+- transcript = summed commitments (a *plain* unified transcript),
 - `public_key = recover_exponent(...)` = g^group-secret.
 
 No party ever sees the group secret; the emergent transcript drops straight
-into the entire pipeline (combine, refresh, seal, sign, ...). Caveats are
-documented: 1-round PBS-style bias applies as in `dkg.py`, and an r-side
-vandal is caught by the commitment check (the mechanical guarantee).
+into the entire pipeline (combine, refresh, seal, sign, ...). The two-round
+commit-then-reveal structure removes the one-round PBS-style last-dealer
+bias: a reveal is bound to its round-1 commit, so the last dealer cannot
+swap in a polynomial chosen after seeing the other dealers' shares (the
+`corrupt_switch` test hook simulates exactly that attempt and every
+recipient catches it). An r-side vandal is caught by the commitment check
+(the mechanical guarantee).
 
 ### 5.4 Linear algebra and multiplication (BGW '88 / Beaver '92)
 
 - Share addition/scaling are free and local (`add_shares`, `mul_share`,
-  `linear_shares`, unified.py:769-823).
-- Transcripts combine in the exponent (`linear_transcript`, unified.py:826):
+  `linear_shares`, unified.py:1013-1045).
+- Transcripts combine in the exponent (`linear_transcript`, unified.py:1046):
   `C'_j = prod C_{t,j}^{c_t}`, digest = same linear combo; the MAC/PoK
   dealer-epoch layers are dropped, authenticity resting on the commitments —
   exactly the refresh discipline.
-- `mul_shares` (unified.py:898) implements Beaver degree-reduction with a
+- `mul_shares` (unified.py:1110) implements Beaver degree-reduction with a
   random triple `([a],[b],[c=a·b])`: open `d = x − a`, `e = y − b`, then
   `[xy] = d[b] + e[a] + [c] + de`. Addition plus this multiplication closes
   arithmetic circuits over the sharing. Honesty framing (documented): the
@@ -284,7 +300,7 @@ for a *linear combination of deals nobody dealt* is derived publicly.
 
 ## 6. Operational layers
 
-### 6.1 Seal / unseal bundles — misuse resistance (unified.py:1694-1781)
+### 6.1 Seal / unseal bundles — misuse resistance (unified.py:2089-2131)
 
 `seal`/`seal_bytes` produce one JSON-serializable dict: the transcript
 (hex), session-bound checksummed share blobs for every holder
@@ -293,7 +309,7 @@ optionally the MAC keys, and — new this session — the **field lock**
 (§6.3). `unseal` runs
 the whole validation pipeline on the way back: format, transcript public
 verification, every blob's checksum + session binding, then the full combine
-pipeline with MAC acceptance and digest screen. Cross-session mixing,
+pipeline with MAC acceptance and the commitment screen. Cross-session mixing,
 corrupted blobs and swapped transcripts fail loudly. `secret_kind` (int vs
 bytes) is explicit so a bundle cannot be unsealed through the wrong path.
 
@@ -316,14 +332,14 @@ and — since v4 — every PoK challenge also binds the full commitment vector
 (the statement), with coefficient challenges additionally binding their
 index and signature challenges binding (R, Y).
 
-### 6.3 Field locks (unified.py:1618-1635)
+### 6.3 Field locks (unified.py:2017)
 
 Every seal bundle embeds `p, q, g, h`; `unseal`/`unseal_bytes` reject a
 bundle sealed under a different safe prime structurally (not "usually fine").
 `_bundle_from` also restored the `weights` field round-trip (a dead-code bug:
 an early `return {}` previously cut it).
 
-### 6.4 Cheater identification (`audit` / `audit_public`, unified.py:1324-1372)
+### 6.4 Cheater identification (`audit` / `audit_public`, unified.py:1692-1723)
 
 `_classify_shares` gives an exact per-share diagnosis (`ok / raw /
 bad_index / out_of_range / duplicate / commit / mac`). `audit` additionally
@@ -331,10 +347,10 @@ reconstructs and reports the secret with a reason on failure; `audit_public`
 never reconstructs — an external auditor pins exactly which shares are
 corrupt *without learning the secret* (Tompa–Woll privacy side). And a holder
 can prove authenticity of its share without surrendering it:
-`prove_share`/`verify_share_proof` (unified.py:605-665) — a FROST-style
+`prove_share`/`verify_share_proof` (unified.py:652-718) — a FROST-style
 Schnorr proof of the Pedersen opening, special-sound and honest-verifier ZK.
 
-### 6.5 Weighted/quota access (`deal_weighted`, unified.py:329)
+### 6.5 Weighted/quota access (`deal_weighted`, unified.py:337)
 
 Virtualisation: one underlying deal with n = Σweights; a participant of
 weight w holds w sub-shares; a coalition is authorized iff covered ≥
@@ -369,7 +385,7 @@ survives the bundle round-trip).
 | Share verification | none | public, computational (DLP) per share; batchable |
 | Malicious dealer | undetectable | commitments + per-coefficient PoK + public transcript |
 | Corrupt holders | silent garbage | detection: IT with MAC keys, computational without; correction: BW; identification: audit |
-| Cross-session mixing | silent garbage | session binding + digest screen rejects |
+| Cross-session mixing | silent garbage | session binding + commitment screen rejects |
 | Lifecycle | re-deal | refresh / redistribute / join, dealer-free |
 | Setup | dealer needed | dealer-free DKG (`distributed_run`) |
 | Use of the secret, secret kept private | reconstruct | exponentiate, sign, add, multiply shares — never materialise |
@@ -436,27 +452,32 @@ conformance tests, no constant-time engineering.
 
 | Piece | Where |
 |---|---|
-| Deal core (s/r poly, commitments, digest, PoK, MACs) | `_deal` :237 |
-| Single / multi / weighted deal | :308 / :319 / :329 |
-| Dealer-free DKG | `distributed_run` :361 |
-| Per-coefficient PoK gen / verify | `_coeff_pok_entries` :213 / `_pok_entries_ok` :482 |
-| Transcript / share public verification | :515 / :581 |
-| Holder ZK proof | `prove_share` :605 / `verify_share_proof` :638 |
-| Combine pipeline (CFOR → BW → digest) | `_recover` :698; CFOR filter `_acceptance_set` :675 |
-| Linear layer + transcript-in-exponent | :769-879; `mul_shares` :898 |
-| Re-issue / exponent recovery | :963 / :1001 |
-| Threshold Schnorr sign / verify | :1054 / :1117 |
-| Batch verify (BGR) | `batch_verify` :1132 |
-| Bytes mode (Krawczyk + stdlib AEAD) | :1237-1278 |
-| Audit / audit_public | :1324 / :1353 |
-| Refresh / redistribute | :1379 / :1461 |
-| Bundle encode/decode, field lock | `_bundle_from` :1637 / `_field_lock` :1618 |
-| Seal / unseal / bytes variants | :1694-1781 |
+| Deal core (s/r poly, commitments, PoK, MACs) | `_deal` :249 |
+| Single / multi / weighted deal | :316 / :327 / :337 |
+| Dealer-free DKG (two-round commit-then-reveal) | `_dkg_commit_round` :369 / `_dkg_reveal_round` :397 / `distributed_run` :483 |
+| Per-coefficient PoK gen / verify | `_coeff_pok_entries` :225 / `_pok_entries_ok` :534 |
+| Transcript / share public verification | :567 / :626 |
+| Holder ZK proof | `prove_share` :652 / `verify_share_proof` :685 |
+| Audit (challenge/holders) | `audit_challenge` :719 / `audit_holders` :828 / `audit` :1692 / `audit_public` :1723 |
+| Combine pipeline (CFOR → BW → commitment screen) | `_recover` :920; CFOR filter `_acceptance_set` :864 |
+| Linear layer + transcript-in-exponent | `mul_share` :989 / `linear_shares` :1013 / `linear_transcript` :1046; `mul_shares` :1110 |
+| Re-issue / rejoin / exponent recovery | :1173 / :1210 / :1266 |
+| Threshold Schnorr sign / verify | :1316 / :1471 |
+| Batch verify (BGR) | `batch_verify` :1486 |
+| Bytes mode (Krawczyk + stdlib AEAD) | `seal_bytes` :2133 / `unseal_bytes` :2156 |
+| Refresh / redistribute | :1749 / :1819 |
+| Bundle encode/decode, field lock | `_bundle_from` :2036 / `_field_lock` :2017 |
+| Seal / unseal / bytes variants | :2089 / :2107 / :2133 |
 | Field, safe prime, generators | `shamir/gf.py` (h-heavy) |
 
-Status: `python tests/test_all.py` → 101/101 passing, including the property
+Status: `python tests/test_all.py` → 110/110 passing, including the property
 fuzz (`test_unified_property_fuzz`), corruption tests, threshold-sign
-regression tests, and production-field seal/unseal
+regression tests (partial verification + replay rejection), the two-round
+DKG commit/reveal tests, the protocol-shaped recovery lifecycle test,
+multi-secret `change_threshold`, weighted-refresh weight preservation, the
+seeded deterministic-replay test (pinning `session_id`: the session is the
+only nondeterminism in the pipeline — everything else replays bit-for-bit
+under a fixed seed), and production-field seal/unseal
 (`test_unified_seal_on_production_field`). No lint/typecheck tooling
 configured — verification is `py_compile` + the test runner.
 

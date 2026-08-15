@@ -206,14 +206,19 @@ def deal_weighted(secret, weights: list[int], quota, field=None, randfunc=None)
     # holds weights[p] sub-shares; authorized iff covered sub-shares >=
     # quota + 1; one underlying deal with n = sum(weights); tr['weights']
     # kept through the bundle wire format
-def distributed_run(n, threshold, field=None, randfunc=None, corrupt=(), corrupt_r=())
+def distributed_run(n, threshold, field=None, randfunc=None, corrupt=(),
+                    corrupt_r=(), corrupt_switch=())
     -> {shares, transcript, public_key, qual, commitments_all, poks,
-       complaints, pok_failures, posted254}
-    # dealer-free unified setup (Pedersen DKG): every party deals a random
-    # unified polynomial + per-coefficient PoK, posts its digest point
-    # (P_i(254), R_i(254)); shares and digest sum over QUAL; nobody ever
-    # sees the group secret; the transcript is a plain unified transcript
-    # (proof=None, mac_tags={}) accepted by the whole pipeline
+       complaints, pok_failures}
+    # dealer-free unified setup (Pedersen DKG, two rounds): round 1 (commit)
+    # posts each party's Pedersen commitments + per-coefficient PoK, no
+    # shares; round 2 (reveal) posts the (s, r) share pairs, each verified
+    # against the round-1 commitments -- a reveal that does not match its
+    # commit disqualifies the dealer (removes the 1-round PBS last-dealer
+    # bias). corrupt_switch simulates that late-adaptive polynomial swap.
+    # Shares and commitments sum over QUAL; nobody ever sees the group
+    # secret; the transcript is a plain unified transcript (proof=None,
+    # mac_tags={}) accepted by the whole pipeline
 def combine(transcript, shares, mac_keys=None, field=None) -> int
 def combine_many(transcript, shares, mac_keys=None, field=None) -> list[int]
 def deal_bytes(secret: bytes, threshold, n, field=None, randfunc=None) -> (shares, keys, tr, chunk_map)  # Krawczyk-1994 hybrid
@@ -248,7 +253,10 @@ def change_threshold(shares, transcript, new_threshold, new_n, field=None,
                      randfunc=None) -> (shares, mac_keys, transcript)
     # single-dealer migration: verify every old share, reconstruct through
     # the full pipeline, re-deal under (t', n'); output drops into combine/
-    # seal/audit like any deal
+    # seal/audit like any deal.  Multi-secret transcripts are re-dealt via
+    # combine_many (output combines with combine_many).  Weighted transcripts
+    # are refused: a plain re-deal would silently flatten the access
+    # structure.
 
 # Linear algebra over shares (BGW-1988: addition gates are free)
 def mul_share(scalar, share, field=None) -> share
@@ -268,8 +276,8 @@ def random_shares(threshold, n, field=None, randfunc=None)
 # Threshold exponentiation (Desmedt-Frankel 1989: g^s without s)
 def recover_exponent(transcript, shares, field=None) -> int   # g^secret mod p
 def threshold_sign(message: bytes, transcript, shares, nonce_transcript,
-                   nonce_shares, signers, field=None,
-                   drop_invalid=False) -> (R, z, Y, detail)
+                   nonce_shares, signers, field=None, drop_invalid=False,
+                   partials=None) -> (R, z, Y, detail)
     # threshold Schnorr: sign WITHOUT reconstructing the key; key sharings
     # come from deal or distributed_run; one fresh nonce sharing per message
     # (reuse leaks the key); z = sum of Lagrange-weighted partials
@@ -277,6 +285,15 @@ def threshold_sign(message: bytes, transcript, shares, nonce_transcript,
     # against its transcript before use: invalid signers raise (naming them)
     # by default, or are excluded with drop_invalid=True (reported in
     # detail["rejected"]) and the signature is produced from the survivors.
+    # partials: {i: z_i} partials *submitted* by the signers (distributed
+    # run).  Every partial is checked against the signer's public R_i = g^k_i
+    # and Y_i = g^x_i (from the transcripts, exponent-only): g^z_i ==
+    # R_i^lambda_i * Y_i^(c*lambda_i), so a wrong or replayed partial is
+    # computationally detected and attributed.  An invalid submitted partial
+    # always aborts (even drop_invalid=True) -- survivors' partials are bound
+    # to the original challenge, so continuation would emit an unverifiable
+    # signature; FROST restart discipline.  detail = {"c", "partials",
+    # "publics": {i: (R_i, Y_i)}, "rejected"}.
 def verify_signature(message: bytes, R, z, Y, field=None) -> bool
     # public g^z == R * Y^c; checks R, Y in the order-q subgroup
 

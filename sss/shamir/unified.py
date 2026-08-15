@@ -366,56 +366,58 @@ def deal_weighted(secret, weights, quota, field=None, randfunc=None):
     return groups, keys, transcript
 
 
-def distributed_run(n, threshold, field=None, randfunc=None, corrupt=(),
-                    corrupt_r=()):
-    """Dealer-free setup for the unified scheme: Pedersen DKG.
+def _dkg_commit_round(n, threshold, session, f, qf, draw):
+    """DKG round 1 (commit): every dealer posts commitments + PoKs.
 
-    Every party i = 1..n deals a random unified polynomial (s-side and
-    r-side masking), broadcasts its Pedersen commitments together with a
-    per-coefficient Schnorr proof of knowledge (per-dealer session), posts
-    its digest point (P_i(254), R_i(254)), and every recipient verifies the
-    received (s, r) share pair against the commitments (complaint on
-    failure).  Disqualified dealers -- any verified complaint or failed
-    proof -- leave QUAL.  The group polynomial is the SUM of the QUAL
-    polynomials: the group secret P(0) is never materialised anywhere.
-
-    The returned transcript is a plain unified transcript (session-bound,
-    commitments, digest point, pedantic proofs/mac_tags = None/{}) and drops
-    straight into the whole pipeline: combine, batch_verify, recover_exponent,
-    refresh, redistribute, seal, ...
-
-    corrupt:   dealer indices that hand a wrong s share to one recipient
-               (frameable, mirrors dkg_run)
-    corrupt_r: dealer indices that hand a wrong r value to one recipient
-
-    Returns a dict with keys: shares ({recipient_index: (s, r)}), transcript,
-    public_key (g^group-secret, exponent-recovered from the transcript),
-    qual, commitments_all ({dealer: commitments}), poks, complaints,
-    pok_failures.
+    Returns (public, private).  `public` holds only public data -- the
+    Pedersen commitments, the per-coefficient PoK (per-dealer session) --
+    and is the round-1 broadcast; `private` holds each dealer's
+    (s_poly, r_poly) for the reveal round.  Round-1 output must exist before
+    any share does: the last dealer to speak has seen only hiding
+    commitments, so it cannot bias the group secret (the one-round PBS
+    last-dealer bias needs the other dealers' *shares*, which do not exist
+    yet).
     """
-    f = _commit_field(field)
-    qf = _arith(field)
-    _check_params(threshold, n)
-    rand = randfunc if randfunc is not None else (lambda: secrets.randbelow(qf.p))
-
-    def _draw():
-        return rand() % qf.p
-
-    session = session_id()
-    deals = {}
+    public = {}
+    private = {}
     for dealer in range(1, n + 1):
         dealer_session = session + bytes([dealer])
-        s_poly = [_draw() for _ in range(threshold + 1)]
-        r_poly = [_draw() for _ in range(threshold + 1)]
+        s_poly = [draw() for _ in range(threshold + 1)]
+        r_poly = [draw() for _ in range(threshold + 1)]
         commitments = [f.commit_double(a, b) for a, b in
                        zip(s_poly, r_poly)]
         pok = {"entries": _coeff_pok_entries(s_poly, r_poly, commitments,
-                                             dealer_session, _draw, f, qf)}
-        deals[dealer] = (s_poly, r_poly, commitments, pok)
+                                             dealer_session, draw, f, qf)}
+        public[dealer] = {"commitments": commitments, "pok": pok,
+                          "session": dealer_session}
+        private[dealer] = (s_poly, r_poly)
+    return public, private
 
+
+def _dkg_reveal_round(public, private, threshold, n, session, f, qf, draw,
+                      corrupt=(), corrupt_r=(), corrupt_switch=()):
+    """DKG round 2 (reveal): dealers post share pairs, recipients verify.
+
+    Every revealed (s, r) pair is checked against the *round-1* commitments
+    (f.eval_commit): a dealer whose reveal does not match its commit is
+    disqualified, with a complaint from every affected recipient.  The PoKs
+    are re-verified against the round-1 broadcasts.
+
+    corrupt:        dealer indices that hand a wrong s share to one
+                    recipient (frameable, mirrors dkg_run)
+    corrupt_r:      dealer indices that hand a wrong r value to one recipient
+    corrupt_switch: dealer indices that commit a valid polynomial in round 1
+                    but reveal a *different* one in round 2 -- the
+                    late-adaptive swap the commit-binding check exists for;
+                    caught on every recipient.
+    """
     recipients = {r: {} for r in range(1, n + 1)}
     complaints = []
-    for dealer, (s_poly, r_poly, commitments, _pok) in deals.items():
+    for dealer, (s_poly, r_poly) in private.items():
+        commitments = public[dealer]["commitments"]
+        if dealer in corrupt_switch:
+            s_poly = [draw() for _ in range(threshold + 1)]
+            r_poly = [draw() for _ in range(threshold + 1)]
         for recipient in range(1, n + 1):
             s = qf.polynomial_eval(s_poly, recipient)
             r = qf.polynomial_eval(r_poly, recipient)
@@ -428,9 +430,9 @@ def distributed_run(n, threshold, field=None, randfunc=None, corrupt=(),
                 complaints.append((dealer, recipient))
 
     pok_failures = []
-    for dealer, (_sp, _rp, commitments, pok) in deals.items():
-        if not _pok_entries_ok(pok["entries"], commitments,
-                               session + bytes([dealer]), threshold, f):
+    for dealer, pub in public.items():
+        if not _pok_entries_ok(pub["pok"]["entries"], pub["commitments"],
+                               pub["session"], threshold, f):
             pok_failures.append(dealer)
 
     disqualified = {d for d, _ in complaints} | set(pok_failures)
@@ -440,7 +442,7 @@ def distributed_run(n, threshold, field=None, randfunc=None, corrupt=(),
     acc_s = [0] * (threshold + 1)
     acc_r = [0] * (threshold + 1)
     for dealer in qual:
-        s_poly, r_poly, commitments, _pok = deals[dealer]
+        s_poly, r_poly = private[dealer]
         for j in range(threshold + 1):
             acc_s[j] = qf.add(acc_s[j], s_poly[j])
             acc_r[j] = qf.add(acc_r[j], r_poly[j])
@@ -465,17 +467,68 @@ def distributed_run(n, threshold, field=None, randfunc=None, corrupt=(),
         "mac_tags": {},
     }
     sample = [(r, s, rv) for r, (s, rv) in shares.items()][:threshold + 1]
-    public_key = recover_exponent(transcript, sample, field)
+    public_key = recover_exponent(transcript, sample, f)
     return {
         "shares": shares,
         "transcript": transcript,
         "public_key": public_key,
         "qual": qual,
-        "commitments_all": {d: deals[d][2] for d in deals},
-        "poks": {d: deals[d][3] for d in deals},
+        "commitments_all": {d: public[d]["commitments"] for d in public},
+        "poks": {d: public[d]["pok"] for d in public},
         "complaints": complaints,
         "pok_failures": pok_failures,
     }
+
+
+def distributed_run(n, threshold, field=None, randfunc=None, corrupt=(),
+                    corrupt_r=(), corrupt_switch=()):
+    """Dealer-free setup for the unified scheme: Pedersen DKG, two rounds.
+
+    Round 1 (commit): every party i = 1..n deals a random unified polynomial
+    (s-side and r-side masking) and broadcasts its Pedersen commitments
+    together with a per-coefficient Schnorr proof of knowledge (per-dealer
+    session) -- no shares yet.  Round 2 (reveal): every party posts the
+    (s, r) share pair for each recipient; each recipient verifies the pair
+    against the round-1 commitments (complaint on failure) and re-checks the
+    PoKs.  Disqualified dealers -- any verified complaint or failed proof --
+    leave QUAL.  The group polynomial is the SUM of the QUAL polynomials:
+    the group secret P(0) is never materialised anywhere.
+
+    The two-round structure removes the one-round PBS-style last-dealer
+    bias: a dealer's reveal is bound to its round-1 commitments, so the
+    last dealer to speak cannot substitute a polynomial chosen after seeing
+    the other dealers' shares (`corrupt_switch` simulates exactly that
+    attempt, and every recipient catches it).
+
+    The returned transcript is a plain unified transcript (session-bound,
+    commitments, proofs/mac_tags = None/{}) and drops
+    straight into the whole pipeline: combine, batch_verify, recover_exponent,
+    refresh, redistribute, seal, ...
+
+    corrupt:        dealer indices that hand a wrong s share to one recipient
+                    (frameable, mirrors dkg_run)
+    corrupt_r:      dealer indices that hand a wrong r value to one recipient
+    corrupt_switch: dealer indices that commit a valid polynomial in round 1
+                    but reveal a different one in round 2 (caught on every
+                    recipient by the commit-binding check)
+
+    Returns a dict with keys: shares ({recipient_index: (s, r)}), transcript,
+    public_key (g^group-secret, exponent-recovered from the transcript),
+    qual, commitments_all ({dealer: commitments}), poks, complaints,
+    pok_failures.
+    """
+    f = _commit_field(field)
+    qf = _arith(field)
+    _check_params(threshold, n)
+    rand = randfunc if randfunc is not None else (lambda: secrets.randbelow(qf.p))
+
+    def _draw():
+        return rand() % qf.p
+
+    session = session_id()
+    public, private = _dkg_commit_round(n, threshold, session, f, qf, _draw)
+    return _dkg_reveal_round(public, private, threshold, n, session, f, qf,
+                             _draw, corrupt, corrupt_r, corrupt_switch)
 
 
 def _pok_entries_ok(entries, commitments, session, threshold, f):
@@ -928,8 +981,8 @@ def combine_many(transcript, shares, mac_keys=None, field=None):
 # Linear algebra over shares (BGW 1988: addition is free)
 # --------------------------------------------------------------------------
 # Shamir sharing over GF(q) is linear: s_i + s'_i is the share i of s + s',
-# c * s_i the share of c * s.  The combined *transcript* -- commitments and
-# digest point -- is derived in the exponent without anyone ever seeing the
+# c * s_i the share of c * s.  The combined *transcript* -- commitments --
+# is derived in the exponent without anyone ever seeing the
 # intermediate secrets, so n holders can jointly obtain a sharing of a linear
 # combination that no single player dealt.
 
@@ -995,8 +1048,8 @@ def linear_transcript(transcripts, coeffs=None, field=None):
 
     Given the public transcripts of several single-secret deals all with the
     same n, returns the transcript of sum_t coeff[t]*s_t: commitments are
-    merged (C_j = prod_t C_t,j^c_t), the digest point is the same linear
-    combination, and the dealer-epoch layers (MAC tags, PoK) are dropped --
+    merged (C_j = prod_t C_t,j^c_t), and the dealer-epoch layers (MAC tags,
+    PoK) are dropped --
     authenticity rests on the (computationally binding) Pedersen commitments,
     exactly as for a refresh.  This lets n holders combine their locally
     summed shares against a publicly sound transcript with no dealer for the
@@ -1062,8 +1115,7 @@ def mul_shares(shares_a, shares_b, transcript_a, transcript_b, field=None,
     clears a fresh random sharing triple ([a], [b], [c=a*b]) locally, opens
     the Beaver masks d = x - a and e = y - b from the *real* x-a / y-b
     sharings, then [x*y] = d*[b] + e*[a] + [c] + d*e is a valid
-    (threshold+1)-of-n sharing whose transcript is derived in the exponent
-    and whose digest point is the same linear combination.
+    (threshold+1)-of-n sharing whose transcript is derived in the exponent.
 
     Honesty framing: because d, e are opened inside this function from the
     honest combined shares, the output is always internally consistent, and
@@ -1200,6 +1252,17 @@ def rejoin_share(transcript, shares, x, field=None):
     return rejoined
 
 
+def _public_share_value(transcript, x, s, r, f):
+    """g^s_x in the exponent from the transcript and a verified share.
+
+    C_x = g^s_x * h^r_x, so g^s_x = C_x / h^r_x; C_x = prod_j C_j^{x^j} is
+    the committed polynomial evaluated at x.  The share's s value never
+    appears in memory (Desmedt-Frankel).
+    """
+    c = f.eval_commit(transcript["commitments"], x)
+    return (c * pow(f.h, (f.q - r % f.q) % f.q, f.p)) % f.p
+
+
 def recover_exponent(transcript, shares, field=None):
     """Threshold exponentiation: recover g^{secret} mod p, never the secret.
 
@@ -1228,11 +1291,8 @@ def recover_exponent(transcript, shares, field=None):
         raise ValueError("fewer than threshold + 1 verified shares, cannot"
                          " recover the exponent")
     holders = verified[:threshold + 1]
-    contributions = []
-    for x, _s, r in holders:
-        c = f.eval_commit(transcript["commitments"], x)
-        gs = (c * pow(f.h, (f.q - r % f.q) % f.q, f.p)) % f.p
-        contributions.append(gs)
+    contributions = [_public_share_value(transcript, x, s, r, f)
+                     for x, s, r in holders]
     lambdas = core.lagrange_coefficient([x for x, _, _ in holders], 0, qf)
     out = 1
     for gs, lam in zip(contributions, lambdas):
@@ -1254,7 +1314,7 @@ def _challenge_sig(message, r_val, y_val, f):
 
 
 def threshold_sign(message, transcript, shares, nonce_transcript, nonce_shares,
-                   signers, field=None, drop_invalid=False):
+                   signers, field=None, drop_invalid=False, partials=None):
     """Threshold Schnorr signature over the unified sharing: sign WITHOUT
     ever reconstructing the key (the knowledgeless path).
 
@@ -1266,23 +1326,41 @@ def threshold_sign(message, transcript, shares, nonce_transcript, nonce_shares,
                           threshold as the key sharing, and every signer
                           index must hold a verified share of BOTH.
     signers:              list of holder indices, len >= threshold + 1.
+    partials:             optional {i: z_i} of partial signatures *submitted*
+                          by the signers, as in a real distributed signing
+                          run.  When given, every submitted partial is
+                          verified independently against the signer's public
+                          nonce commitment R_i = g^k_i and public key share
+                          Y_i = g^x_i (both derived from the transcripts in
+                          the exponent -- no key material is ever exposed):
+                          the partial passes iff g^z_i == R_i^{lambda_i} *
+                          Y_i^{c*lambda_i}.  When None (default), each
+                          partial is computed locally from the signer's
+                          verified shares and then checked by the same
+                          equation.
 
     Returns (R, z, Y, detail): R = g^k, z = k + c*x, Y = g^x the public key,
-    detail = {"c": c, "partials": {i: z_i}} (z = sum of the Lagrange-weighted
-    partials z_i = lambda_i*(k_i + c*x_i)).
-    Verify publicly with verify_signature -- nobody sees the key, the nonce
-    k, or any individual share.  Honest caveat (documented, all threshold
-    Schnorr schemes): never reuse a nonce sharing for two messages -- z1 - z2
-    = c1*x - c2*x leaks the key.
+    detail = {"c": c, "partials": {i: z_i}, "publics": {i: (R_i, Y_i)},
+    "rejected": [...]} (z = sum of the Lagrange-weighted partials z_i =
+    lambda_i*(k_i + c*x_i)).  Verify publicly with verify_signature --
+    nobody sees the key, the nonce k, or any individual share.  Honest
+    caveat (documented, all threshold Schnorr schemes): never reuse a nonce
+    sharing for two messages -- z1 - z2 = c1*x - c2*x leaks the key.
 
     Malicious-signer handling: every signer's key and nonce share is checked
-    against its transcript *before* the partial is computed, so a corrupt or
+    against its transcript *before* the challenge is fixed, so a corrupt or
     swapped share is attributed to its signer index rather than silently
-    contaminating z.  With drop_invalid=True the failing signers are excluded
-    from the partial sum (reported in detail["rejected"]) and the signature
-    is produced from the remaining verified signers -- matching the
-    protocol-level "accept only distinct valid contributions, request
-    replacements" rule (PROTOCOL.md 3.4).
+    contaminating z (drop_invalid=True excludes such signers from the
+    signing set).  Every partial is then checked against its signer's public
+    (R_i, Y_i) under the challenge of the signing set -- a signer that runs
+    the signing step wrongly, or a live adversary replaying a partial from
+    an earlier message (the challenge c binds message, R and Y), is
+    attributed to its index.  An invalid *submitted* partial always aborts
+    the run (even with drop_invalid=True): the surviving partials are bound
+    to the challenge of the original signer set, and silently continuing
+    would emit a signature that fails public verification.  This is the
+    FROST restart discipline: drop the failing signer, re-run the protocol
+    with the smaller set and fresh partials (PROTOCOL.md 3.4).
     """
     f = _commit_field(field)
     qf = _arith(field)
@@ -1300,7 +1378,12 @@ def threshold_sign(message, transcript, shares, nonce_transcript, nonce_shares,
     nonce_by_x = {x: (s, r) for x, s, r in nonce_shares}
     if len(key_by_x) != len(shares) or len(nonce_by_x) != len(nonce_shares):
         raise ValueError("duplicate share x-coordinates")
+    if len(set(signers)) != len(signers):
+        raise ValueError("duplicate signer indices in the signing set")
+    if partials is not None and not isinstance(partials, dict):
+        raise TypeError("partials must be a dict {signer_index: z_i}")
     rejected = []
+    candidates = []
     for i in signers:
         if i not in key_by_x or i not in nonce_by_x:
             rejected.append(i)
@@ -1310,8 +1393,12 @@ def threshold_sign(message, transcript, shares, nonce_transcript, nonce_shares,
                 not verify_share((i, nonce_by_x[i][0], nonce_by_x[i][1]),
                                  nonce_transcript, f):
             rejected.append(i)
-    clean = [i for i in signers if i not in rejected]
-    if len(clean) < threshold + 1:
+            continue
+        if partials is not None and i not in partials:
+            rejected.append(i)
+            continue
+        candidates.append(i)
+    if len(candidates) < threshold + 1:
         raise ValueError("signer set collapses below threshold + 1 after "
                          "rejecting %d invalid signer(s): %s"
                          % (len(rejected), sorted(rejected)))
@@ -1319,27 +1406,65 @@ def threshold_sign(message, transcript, shares, nonce_transcript, nonce_shares,
         raise ValueError("invalid signer contribution(s) from index(es) %s "
                          "(pass drop_invalid=True to sign with the remaining"
                          " signers)" % sorted(rejected))
+
+    def _verify_partial(z_i, i, lam, c_val):
+        """g^z_i == R_i^lam * Y_i^(c*lam); R_i, Y_i from the transcripts."""
+        try:
+            (sx, rx) = key_by_x[i]
+            (sk, rk) = nonce_by_x[i]
+            r_i = _public_share_value(nonce_transcript, i, sk, rk, f)
+            y_i = _public_share_value(transcript, i, sx, rx, f)
+            lhs = f.commit(z_i)
+            rhs = (pow(r_i, lam, f.p) *
+                   pow(y_i, qf.mul(c_val, lam), f.p)) % f.p
+            return lhs == rhs, r_i, y_i
+        except (ValueError, TypeError):
+            return False, None, None
+
     r_val = recover_exponent(nonce_transcript,
-                             [sh for sh in nonce_shares if sh[0] in clean],
-                             f)
+                             [sh for sh in nonce_shares
+                              if sh[0] in candidates], f)
     y_val = recover_exponent(transcript,
-                             [sh for sh in shares if sh[0] in clean], f)
+                             [sh for sh in shares
+                              if sh[0] in candidates], f)
     if r_val == 1:
         raise ValueError("nonce k == 0: draw a fresh nonce sharing")
     if y_val == 1:
         raise ValueError("key x == 0: refuse to sign with a zero key")
     c_val = _challenge_sig(message, r_val, y_val, f)
-    signer_xs = [i for i in clean]
-    lambdas = core.lagrange_coefficient(signer_xs, 0, qf)
-    z = 0
-    partials = {}
-    for lam, i in zip(lambdas, signer_xs):
+    lambdas = core.lagrange_coefficient(candidates, 0, qf)
+    accepted = []
+    z_i_by_x = {}
+    publics = {}
+    partial_failures = []
+    for lam, i in zip(lambdas, candidates):
         (sx, _rx) = key_by_x[i]
         (sk, _rk) = nonce_by_x[i]
-        z_i = qf.mul(lam, qf.add(sk, qf.mul(c_val, sx)))
-        z = qf.add(z, z_i)
-        partials[i] = z_i
-    detail = {"c": c_val, "partials": partials, "rejected": list(rejected)}
+        if partials is not None:
+            z_i = partials[i]
+        else:
+            z_i = qf.mul(lam, qf.add(sk, qf.mul(c_val, sx)))
+        ok, r_i, y_i = _verify_partial(z_i, i, lam, c_val)
+        if not ok:
+            partial_failures.append(i)
+            rejected.append(i)
+            continue
+        accepted.append(i)
+        z_i_by_x[i] = z_i
+        publics[i] = (r_i, y_i)
+    if partial_failures:
+        raise ValueError("invalid partial signature(s) from index(es) %s: "
+                         "partials are bound to the signer set's challenge; "
+                         "replace the failing signer(s) and re-run the "
+                         "protocol (FROST restart discipline)"
+                         % sorted(set(partial_failures)))
+    z = 0
+    partials_out = {}
+    for i in accepted:
+        z = qf.add(z, z_i_by_x[i])
+        partials_out[i] = z_i_by_x[i]
+    detail = {"c": c_val, "partials": partials_out, "publics": publics,
+              "rejected": list(rejected)}
     return r_val, z, y_val, detail
 
 
@@ -1384,6 +1509,8 @@ def batch_verify(shares, transcript, field=None, randfunc=None):
     if not verify_transcript(transcript, f):
         return False
     if not shares:
+        return False
+    if len(set(x for x, _, _ in shares)) != len(shares):
         return False
     draw = randfunc if randfunc is not None else (
         lambda: secrets.randbits(BATCH_WEIGHT_BITS))
@@ -1700,8 +1827,8 @@ def redistribute(shares, transcript, new_threshold, new_n, field=None,
 
     Returns (new_shares, new_transcript, posted):
     * new_shares:     [(j, s''_j, r''_j)] for j in 1..new_n.
-    * new_transcript: same session, new threshold/n, commitments, digest
-                      point, mac_tags cleared and proof dropped.
+    * new_transcript: same session, new threshold/n, commitments,
+                      mac_tags cleared and proof dropped.
     * posted:         {} (reserved; nothing is published during
                       redistribution -- no polynomial evaluation may leave
                       the protocol, see _screen_against_commitments).
@@ -1784,11 +1911,19 @@ def change_threshold(shares, transcript, new_threshold, new_n, field=None,
 
     Returns (new_shares, mac_keys, new_transcript) exactly like `deal`, so
     the output drops straight into the pipeline (combine, seal, audit, ...).
+    Multi-secret transcripts are re-dealt through combine_many (output
+    combines with combine_many).  Weighted transcripts are refused: a plain
+    re-deal would silently flatten the access structure.
     """
     f = _commit_field(field)
     qf = _arith(field)
     if not verify_transcript(transcript, f):
         raise ValueError("transcript failed public verification")
+    if transcript.get("weights") is not None:
+        raise ValueError("change_threshold does not support weighted "
+                         "transcripts (deal_weighted): a plain re-deal would "
+                         "silently change the access structure -- re-deal "
+                         "the weighted structure explicitly")
     _check_params(new_threshold, new_n)
     threshold = transcript["threshold"]
     if len(shares) < threshold + 1:
@@ -1802,10 +1937,9 @@ def change_threshold(shares, transcript, new_threshold, new_n, field=None,
             raise ValueError("old share at index %d failed verification"
                              % share[0])
     if transcript["secrets"] == 1:
-        secret = combine(transcript, shares, field=f)
-        secrets = [secret]
+        secrets = [combine(transcript, shares, field=f)]
     else:
-        secrets = combine(transcript, shares, field=f)
+        secrets = combine_many(transcript, shares, field=f)
     new_shares, mac_keys, new_transcript = _deal(
         secrets, new_threshold, new_n, f, randfunc)
     return new_shares, mac_keys, new_transcript
