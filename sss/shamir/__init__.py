@@ -16,10 +16,11 @@ Modules:
     hierarchical -- Tassa (2007) Birkhoff derivative hierarchical sharing
     reshare      -- Desmedt-Jarecki (1993) verifiable redistribution
     unified      -- one construction absorbing the lineage: Pedersen shares +
-                    Rabin-Ben-Or MACs + Berlekamp-Welch + digest point +
-                    refresh + redistribution + BGW addition/multiplication +
-                    threshold exponentiation + batch verification + share
-                    re-issuance + ZK share proofs + seal/open
+                    Rabin-Ben-Or MACs + Berlekamp-Welch + refresh +
+                    redistribution + BGW addition/multiplication + threshold
+                    exponentiation + batch verification + share re-issuance +
+                    slot repair (rejoin) + threshold change + ZK share proofs
+                    + seal/open
 """
 
 from . import (core, dkg, format, gf, gf256, hierarchical, hybrid,
