@@ -2,17 +2,23 @@
 //!
 //! No other workspace crate directly uses cryptographic primitive libraries.
 
+use std::collections::BTreeSet;
+
+mod rotation;
+
+pub use rotation::*;
+
 use blahaj::{Share, Sharks};
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit, Payload},
 };
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use gp_types::{AeadCiphertext, Id32, SealedMessage};
+use gp_types::{AeadCiphertext, ConfigRef, Id32, SealedMessage};
 use hkdf::Hkdf;
 use rand_chacha08::{ChaCha20Rng as ChaCha20Rng08, rand_core::SeedableRng as _};
 use rand_chacha10::{ChaCha20Rng as ChaCha20Rng10, rand_core::SeedableRng as _};
-use reed_solomon_erasure::galois_8::ReedSolomon;
+use reed_solomon_turbo::ReedSolomon;
 use rs_merkle::{MerkleProof, MerkleTree, algorithms::Sha256 as MerkleSha256};
 use sha2::{Digest, Sha256};
 use x_wing::{
@@ -57,6 +63,10 @@ pub enum CryptoError {
     InvalidMerkleProof,
     #[error("KDF expansion failed")]
     Kdf,
+    #[error("invalid FROST share, public package, or protocol message")]
+    InvalidFrost,
+    #[error("FROST participant identifier is duplicated or out of range")]
+    InvalidFrostParticipant,
 }
 
 #[must_use]
@@ -83,6 +93,100 @@ pub fn guardian_share_key(
     info.extend_from_slice(&config_version.to_be_bytes());
     info.extend_from_slice(&guardian_index.to_be_bytes());
     hkdf_sha256(authorization_key, &info)
+}
+
+fn config_ref_kdf_info(domain: &[u8], config_ref: &ConfigRef, actor_index: Option<u16>) -> Vec<u8> {
+    let mut info = Vec::with_capacity(domain.len() + 32 + 8 * 3 + 32 + 2);
+    info.extend_from_slice(domain);
+    info.extend_from_slice(&config_ref.config_id);
+    info.extend_from_slice(&config_ref.payload_generation.to_be_bytes());
+    info.extend_from_slice(&config_ref.authorization_epoch.to_be_bytes());
+    info.extend_from_slice(&config_ref.guardian_epoch.to_be_bytes());
+    info.extend_from_slice(&config_ref.epoch_binding);
+    if let Some(index) = actor_index {
+        info.extend_from_slice(&index.to_be_bytes());
+    }
+    info
+}
+
+/// Epoch-specific DEK-share wrapper key. The full `ConfigRef` and exact slot
+/// index prevent wrapper reuse across guardian epochs.
+pub fn guardian_share_key_v3(
+    authorization_key: &[u8; 32],
+    config_ref: &ConfigRef,
+    guardian_index: u16,
+) -> Result<Id32, CryptoError> {
+    if guardian_index == 0 || guardian_index > crate::rotation::FROST_MAX_PARTICIPANTS {
+        return Err(CryptoError::InvalidFrostParticipant);
+    }
+    hkdf_sha256(
+        authorization_key,
+        &config_ref_kdf_info(
+            b"gp/guardian-dek-share/v3",
+            config_ref,
+            Some(guardian_index),
+        ),
+    )
+}
+
+/// Independent epoch storage-envelope key for a ciphertext fragment. This
+/// re-randomizes at-rest fragment bytes without decrypting the payload C.
+pub fn guardian_fragment_key_v3(
+    authorization_key: &[u8; 32],
+    config_ref: &ConfigRef,
+    guardian_index: u16,
+) -> Result<Id32, CryptoError> {
+    if guardian_index == 0 || guardian_index > crate::rotation::FROST_MAX_PARTICIPANTS {
+        return Err(CryptoError::InvalidFrostParticipant);
+    }
+    hkdf_sha256(
+        authorization_key,
+        &config_ref_kdf_info(
+            b"gp/guardian-ciphertext-fragment/v3",
+            config_ref,
+            Some(guardian_index),
+        ),
+    )
+}
+
+pub fn descriptor_key_v3(
+    authorization_key: &[u8; 32],
+    config_ref: &ConfigRef,
+) -> Result<Id32, CryptoError> {
+    hkdf_sha256(
+        authorization_key,
+        &config_ref_kdf_info(b"gp/recovery-descriptor/v3", config_ref, None),
+    )
+}
+
+/// Encrypts crash-recovery state for one node under a key derived from its
+/// persistent identity seed and the exact canonical rotation/session context.
+/// Callers persist only the returned ciphertext and erase the plaintext.
+pub fn seal_local_rotation_journal(
+    node_identity_seed: &Id32,
+    nonce: [u8; 24],
+    plaintext: &[u8],
+    canonical_context: &[u8],
+) -> Result<AeadCiphertext, CryptoError> {
+    let mut info = b"gp/local-rotation-journal/v3".to_vec();
+    info.extend_from_slice(&sha256(canonical_context));
+    let mut key = hkdf_sha256(node_identity_seed, &info)?;
+    let result = aead_encrypt(&key, nonce, plaintext, canonical_context);
+    key.zeroize();
+    result
+}
+
+pub fn open_local_rotation_journal(
+    node_identity_seed: &Id32,
+    encrypted: &AeadCiphertext,
+    canonical_context: &[u8],
+) -> Result<SecretVec, CryptoError> {
+    let mut info = b"gp/local-rotation-journal/v3".to_vec();
+    info.extend_from_slice(&sha256(canonical_context));
+    let mut key = hkdf_sha256(node_identity_seed, &info)?;
+    let result = aead_decrypt(&key, encrypted, canonical_context);
+    key.zeroize();
+    result
 }
 
 pub fn descriptor_key(
@@ -228,23 +332,114 @@ pub fn erasure_reconstruct(
     let parity = (total_shards - data_shards) as usize;
     let coder = ReedSolomon::new(data_shards as usize, parity)
         .map_err(|_| CryptoError::InvalidThreshold)?;
-    let mut shards: Vec<Option<Vec<u8>>> = vec![None; total_shards as usize];
+    let shard_len = fragments
+        .first()
+        .map(|(_, fragment)| fragment.len())
+        .filter(|length| *length > 0)
+        .ok_or(CryptoError::InvalidFragments)?;
+    let mut shards = vec![(vec![0_u8; shard_len], false); total_shards as usize];
     for (index, fragment) in fragments {
         let position = usize::from(*index)
             .checked_sub(1)
             .filter(|position| *position < shards.len())
             .ok_or(CryptoError::InvalidFragments)?;
-        shards[position] = Some(fragment.clone());
+        if fragment.len() != shard_len || shards[position].1 {
+            return Err(CryptoError::InvalidFragments);
+        }
+        shards[position] = (fragment.clone(), true);
     }
     coder
         .reconstruct(&mut shards)
         .map_err(|_| CryptoError::InvalidFragments)?;
     let mut output = Vec::new();
-    for shard in shards.into_iter().take(data_shards as usize) {
-        output.extend_from_slice(&shard.ok_or(CryptoError::InvalidFragments)?);
+    for (shard, present) in shards.into_iter().take(data_shards as usize) {
+        if !present {
+            return Err(CryptoError::InvalidFragments);
+        }
+        output.extend_from_slice(&shard);
     }
     output.truncate(original_len);
     Ok(output)
+}
+
+/// Reconstruct authenticated ciphertext bytes from an old erasure quorum and
+/// encode a complete successor fragment set. This function never performs
+/// payload AEAD decryption.
+pub fn rotate_ciphertext_fragments(
+    old_fragments: &[(u16, Vec<u8>)],
+    old_data_shards: u16,
+    old_total_shards: u16,
+    ciphertext_len: usize,
+    new_data_shards: u16,
+    new_total_shards: u16,
+) -> Result<Vec<Vec<u8>>, CryptoError> {
+    let mut seen = BTreeSet::new();
+    if old_fragments.iter().any(|(index, _)| !seen.insert(*index)) {
+        return Err(CryptoError::InvalidFragments);
+    }
+    let ciphertext = erasure_reconstruct(
+        old_fragments,
+        old_data_shards,
+        old_total_shards,
+        ciphertext_len,
+    )?;
+    erasure_encode(&ciphertext, new_data_shards, new_total_shards)
+}
+
+pub const CUSTODY_BLOCK_SIZE: usize = 4096;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CustodyCommitment {
+    pub root: Id32,
+    pub block_count: u32,
+    pub proofs: Vec<Vec<u8>>,
+}
+
+fn custody_leaf(index: u32, block: &[u8]) -> Id32 {
+    let mut value = b"gp/custody-block/v3".to_vec();
+    value.extend_from_slice(&index.to_be_bytes());
+    value.extend_from_slice(&(block.len() as u32).to_be_bytes());
+    value.extend_from_slice(block);
+    sha256(&value)
+}
+
+/// Builds a sampled-retrieval Merkle commitment. It is intentionally not
+/// described as a proof of retrievability.
+pub fn custody_commit(bytes: &[u8]) -> Result<CustodyCommitment, CryptoError> {
+    if bytes.is_empty() {
+        return Err(CryptoError::InvalidMerkleProof);
+    }
+    let leaves = bytes
+        .chunks(CUSTODY_BLOCK_SIZE)
+        .enumerate()
+        .map(|(index, block)| custody_leaf(index as u32, block))
+        .collect::<Vec<_>>();
+    let block_count = u32::try_from(leaves.len()).map_err(|_| CryptoError::InvalidMerkleProof)?;
+    let (root, proofs) = merkle_commit(&leaves)?;
+    Ok(CustodyCommitment {
+        root,
+        block_count,
+        proofs,
+    })
+}
+
+pub fn custody_verify_block(
+    root: Id32,
+    block_count: u32,
+    block_index: u32,
+    block: &[u8],
+    proof: &[u8],
+) -> Result<(), CryptoError> {
+    if block_count == 0 || block_index >= block_count || block.len() > CUSTODY_BLOCK_SIZE {
+        return Err(CryptoError::InvalidMerkleProof);
+    }
+    merkle_verify(
+        root,
+        custody_leaf(block_index, block),
+        block_index as usize,
+        block_count as usize,
+        proof,
+    )
 }
 
 pub fn merkle_commit(leaves: &[[u8; 32]]) -> Result<(Id32, Vec<Vec<u8>>), CryptoError> {
@@ -626,6 +821,92 @@ mod tests {
         let (root, proofs) = merkle_commit(&leaves).unwrap();
         assert!(merkle_verify(root, leaves[1], 1, leaves.len(), &proofs[1]).is_ok());
         assert!(merkle_verify(root, sha256(b"tampered"), 1, leaves.len(), &proofs[1]).is_err());
+    }
+
+    #[test]
+    fn v3_epoch_keys_separate_share_fragment_epoch_and_actor_contexts() {
+        let authorization_key = [1; 32];
+        let old = ConfigRef {
+            config_id: [2; 32],
+            payload_generation: 3,
+            authorization_epoch: 4,
+            guardian_epoch: 5,
+            epoch_binding: [6; 32],
+        };
+        let mut new = old;
+        new.guardian_epoch += 1;
+        new.epoch_binding = [7; 32];
+        let old_share = guardian_share_key_v3(&authorization_key, &old, 1).unwrap();
+        assert_ne!(
+            old_share,
+            guardian_share_key_v3(&authorization_key, &new, 1).unwrap()
+        );
+        assert_ne!(
+            old_share,
+            guardian_share_key_v3(&authorization_key, &old, 2).unwrap()
+        );
+        assert_ne!(
+            old_share,
+            guardian_fragment_key_v3(&authorization_key, &old, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn ciphertext_fragment_rotation_reencodes_without_payload_decryption() {
+        let ciphertext = (0..173_u8).collect::<Vec<_>>();
+        let old = erasure_encode(&ciphertext, 3, 5).unwrap();
+        let selected = vec![
+            (1, old[0].clone()),
+            (3, old[2].clone()),
+            (5, old[4].clone()),
+        ];
+        let new = rotate_ciphertext_fragments(&selected, 3, 5, ciphertext.len(), 4, 7).unwrap();
+        let reconstructed = erasure_reconstruct(
+            &[
+                (2, new[1].clone()),
+                (4, new[3].clone()),
+                (5, new[4].clone()),
+                (7, new[6].clone()),
+            ],
+            4,
+            7,
+            ciphertext.len(),
+        )
+        .unwrap();
+        assert_eq!(reconstructed, ciphertext);
+    }
+
+    #[test]
+    fn custody_sample_rejects_block_and_proof_mutation() {
+        let bytes = vec![9_u8; CUSTODY_BLOCK_SIZE * 2 + 17];
+        let commitment = custody_commit(&bytes).unwrap();
+        let block = &bytes[CUSTODY_BLOCK_SIZE..CUSTODY_BLOCK_SIZE * 2];
+        custody_verify_block(
+            commitment.root,
+            commitment.block_count,
+            1,
+            block,
+            &commitment.proofs[1],
+        )
+        .unwrap();
+        let mut bad = block.to_vec();
+        bad[0] ^= 1;
+        assert!(
+            custody_verify_block(
+                commitment.root,
+                commitment.block_count,
+                1,
+                &bad,
+                &commitment.proofs[1]
+            )
+            .is_err()
+        );
+        let mut proof = commitment.proofs[1].clone();
+        proof[0] ^= 1;
+        assert!(
+            custody_verify_block(commitment.root, commitment.block_count, 1, block, &proof)
+                .is_err()
+        );
     }
 
     #[test]

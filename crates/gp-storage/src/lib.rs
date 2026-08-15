@@ -19,7 +19,22 @@ pub enum StorageError {
     WrongConfiguration,
     #[error("request id or nonce has already been observed")]
     Replay,
+    #[error("another child or plan is already locked for this predecessor")]
+    Conflict,
+    #[error("guardian epoch transition is invalid")]
+    InvalidEpoch,
+    #[error("prepared state has not been durably committed")]
+    NotDurable,
+    #[error("no prepared successor exists")]
+    NoPreparedSuccessor,
+    #[error("operation is forbidden after activation")]
+    AlreadyActivated,
+    #[error("injected atomic persistence failure")]
+    InjectedFailure,
 }
+
+mod rotation;
+pub use rotation::*;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SignerState {

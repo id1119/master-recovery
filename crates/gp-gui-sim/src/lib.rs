@@ -13,13 +13,14 @@ use axum::{
     routing::{get, post},
 };
 use gp_ipc::{Command, IPC_VERSION, Response, execute};
-use gp_sim::DemoOptions;
+use gp_sim::{DemoOptions, RotationDemoOptions, RotationDemoResult, run_rotation_demo};
 use serde::{Deserialize, Serialize};
 
 pub async fn serve(port: u16) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(index))
         .route("/api/demo", post(run_demo_post))
+        .route("/api/rotation", post(run_rotation_post))
         .route("/api/signer-keys", post(signer_keys_post))
         .route("/api/health", get(health))
         .layer(DefaultBodyLimit::max(1280 * 1024));
@@ -28,6 +29,30 @@ pub async fn serve(port: u16) -> anyhow::Result<()> {
     println!("Guardian Protocol simulator: http://{address}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", content = "body", rename_all = "snake_case")]
+enum RotationApiResponse {
+    Complete(Box<RotationDemoResult>),
+    Error(String),
+}
+
+async fn run_rotation_post(
+    Json(options): Json<RotationDemoOptions>,
+) -> (StatusCode, HeaderMap, Json<RotationApiResponse>) {
+    match run_rotation_demo(&options) {
+        Ok(result) => (
+            StatusCode::OK,
+            security_headers(),
+            Json(RotationApiResponse::Complete(Box::new(result))),
+        ),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            security_headers(),
+            Json(RotationApiResponse::Error(error.to_string())),
+        ),
+    }
 }
 
 async fn index() -> (HeaderMap, Html<&'static str>) {
@@ -146,6 +171,10 @@ mod tests {
             "observedMetric",
             "packetChart",
             "comparisonPanel",
+            "rotationButton",
+            "rotationStatus",
+            "rotationEpoch",
+            "rotationGuardians",
         ] {
             assert!(
                 INDEX_HTML.contains(required),

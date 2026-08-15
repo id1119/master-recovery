@@ -1,4 +1,4 @@
-.PHONY: test lint demo gui network-up network-setup network-recover network-cancel network-demo network-dashboard network-down
+.PHONY: test lint demo gui network-up network-setup network-recover network-cancel network-demo network-v3-smoke network-dashboard network-down
 
 test:
 	cargo test --workspace
@@ -45,6 +45,9 @@ network-cancel:
 		--cancel-before-release
 
 network-demo: network-setup network-recover
+
+network-v3-smoke:
+	tools/test-v3-network.sh
 
 network-dashboard:
 	python3 tools/node-dashboard/dashboard.py

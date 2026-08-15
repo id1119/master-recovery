@@ -1,6 +1,8 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use gp_sim::{DemoOptions, DemoResult, run_demo};
+use gp_sim::{
+    DemoOptions, DemoResult, RotationDemoOptions, RotationDemoResult, run_demo, run_rotation_demo,
+};
 use gp_types::MetadataMode;
 
 #[derive(Parser)]
@@ -18,11 +20,32 @@ enum Command {
     Cancel(DemoArgs),
     /// Replay one seed in OFF, BASIC, and STRONG metadata modes.
     Compare(DemoArgs),
+    /// Run four protocol-v3 guardian rotations (G4->G9, G2->G10,
+    /// G7->G11, G5->G12) followed by delayed recovery.
+    Rotate(RotationArgs),
     /// Start the browser-based visual simulator.
     Serve {
         #[arg(long, default_value_t = 8787)]
         port: u16,
     },
+}
+
+#[derive(Clone, Args)]
+struct RotationArgs {
+    #[arg(long, default_value_t = 424_242)]
+    seed: u64,
+    #[arg(long, default_value = "correct horse battery staple")]
+    secret: String,
+    #[arg(long, default_value_t = 5)]
+    delay_seconds: u64,
+    /// Zero-based rotation ordinal to owner-cancel before Release.
+    #[arg(long)]
+    cancel_at: Option<usize>,
+    /// Zero-based rotation ordinal whose malformed RTS message must abort.
+    #[arg(long)]
+    fail_at: Option<usize>,
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Clone, Args)]
@@ -109,8 +132,50 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Command::Rotate(args) => {
+            let result = run_rotation_demo(&RotationDemoOptions {
+                seed: args.seed,
+                secret: args.secret,
+                simulated_delay_secs: args.delay_seconds,
+                cancel_rotation_at: args.cancel_at,
+                fail_preparation_at: args.fail_at,
+                ..RotationDemoOptions::default()
+            })?;
+            display_rotation(result, args.json)?;
+        }
         Command::Serve { port } => gp_gui_sim::serve(port).await?,
     }
+    Ok(())
+}
+
+fn display_rotation(result: RotationDemoResult, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+    println!(
+        "Guardian Rotation v3 · seed {} · epoch {} -> {} · {}/{} completed",
+        result.seed,
+        result.initial_guardian_epoch,
+        result.final_guardian_epoch,
+        result.rotations_completed,
+        result.rotations_requested
+    );
+    for event in &result.events {
+        println!(
+            "epoch {:>2} {:<9} {}",
+            event.guardian_epoch, event.phase, event.message
+        );
+    }
+    println!(
+        "active={:?} retired={:?} · DEK preserved={} · rotation plaintext decryptions={} · recovery={}",
+        result.active_guardians,
+        result.retired_guardians,
+        result.dek_preserved,
+        result.plaintext_decryptions_during_rotation,
+        if result.success { "success" } else { "failed" }
+    );
+    println!("{}", result.security_notice);
     Ok(())
 }
 

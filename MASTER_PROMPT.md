@@ -16,6 +16,38 @@ The prototype succeeds if:
 
 Everything below exists to serve that demo.
 
+## Protocol-v3 Guardian Rotation amendment
+
+`GUARDIAN_ROTATION.md` is authoritative for Guardian Rotation and is part of
+this specification. Where older v2 text describes guardian membership or
+config storage as immutable, that text remains true only for protocol v2.
+
+Protocol v3 uses Staged Verifiable Guardian Epochs. Routine rotation retains
+the encrypted payload and the same DEK, repairs encrypted ciphertext fragments
+without decrypting them, issues replacement shares with Zcash Foundation
+FROST Ristretto255 RTS, and then runs a complete successor-roster DKG share
+refresh. The coordinator never receives a plaintext DEK share or DEK. Every
+rotation uses signer-threshold Begin -> Delay -> Release authorization, remains
+vetoable by the setup-time owner cancellation key before activation, requires
+durable preparation by every successor guardian, and activates through a
+freshness-witness quorum certificate. Recovery requests remain bound to the
+epoch in which they begin; old epochs drain those requests and cannot accept
+new ones after cutover.
+
+`ConfigRef` contains a fresh per-epoch `epoch_binding`. The computed capsule
+hash is separate, so descriptor/share encryption can bind the ConfigRef without
+a circular ciphertext/capsule-hash dependency. Activate votes and witnesses
+bind the separately computed canonical capsule-body hash.
+
+The selected FROST library is maintained and its core has historical external
+audit coverage. Its later share-refresh integration still requires a dedicated
+professional review before production use. This repository may wrap those
+library APIs in `gp-crypto`; it must not reimplement their field arithmetic,
+repair equations, VSS, or DKG combiner.
+
+Protocol-v2 configurations are immutable and recovery-only. Migration to v3 is
+explicit and emits a v3 Recovery Card that pins the freshness-witness set.
+
 ---
 
 ## 1. Rules

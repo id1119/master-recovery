@@ -4,6 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gp_types::{Id32, PROTOCOL_VERSION, PendingRecovery, RecoveryRequest, RecoveryState};
 
+mod rotation;
+pub use rotation::*;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecoveryEvent {
     RequestCreated,

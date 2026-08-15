@@ -1,5 +1,34 @@
 # Rust Architecture
 
+## Protocol-v3 rotation implementation
+
+- `gp-types::rotation` defines ConfigRef, private plans, every
+  vote/certificate/ack, public capsule/card, guardian records, witness reads
+  and custody samples without cryptography or I/O.
+- `gp-wire::rotation` manually constructs domain-separated, length-prefixed
+  transcripts; it rejects duplicate actor ids, inconsistent nested quorum
+  material and oversized inputs. No Rust serialization is signed.
+- `gp-crypto::rotation` is a thin adapter over maintained ZF FROST
+  Ristretto255 RTS and refresh-DKG. It also supplies full-epoch HKDF/AEAD
+  separation, ciphertext-only fragment repair and sampled Merkle custody
+  checks. No field or polynomial arithmetic is local.
+- `gp-core::rotation` contains the deterministic RotationMachine,
+  EpochWitnessMachine and epoch-bound recovery/draining machine.
+- `gp-storage::rotation` models atomic ACTIVE/PREPARED/DRAINING records,
+  zeroizing DPSS journals, signer locks, witness locks and replay/cancellation
+  tombstones. Network JSON persistence uses temp-write, file fsync, rename and
+  directory fsync.
+- `gp-sim::rotation` uses those same components for repeated G4->G9,
+  G2->G10, G7->G11 and G5->G12 handoffs and adversarial aborts.
+- `gp-network` retains v2 endpoints and adds live v3 setup, signer/guardian
+  rotation and recovery mailboxes, an ephemeral rotation coordinator, fresh
+  per-epoch aliases, and a separate witness role with pinned signer
+  verification, durable one-child activation, owner-signed `2f+1` cancellation
+  vetoes, and nonce-bound reads. Provider messages are signed and X-Wing
+  sealed directly for their destination; the coordinator only relays opaque
+  provider payloads. A mode-0600 rotation-control artifact lets a separate
+  owner process cancel during Delay.
+
 ## Workspace
 
 ```text
@@ -176,6 +205,8 @@ Real multi-process network runtime for Docker or separate VMs.
 - ephemeral setup and recovery clients,
 - the same `gp-core` guardian state machine and `gp-crypto` primitives used by
   the simulator.
+- `setup-v3`, `rotate-v3`, `discover-v3`, and `recover-v3` clients, including
+  repeated guardian replacement without a new Recovery Card.
 
 The network relay is a direct single-hop prototype, not the STRONG simulated
 mixnet. See `NETWORK_GUIDE.md` for APIs, flows, Docker topology, and limits.

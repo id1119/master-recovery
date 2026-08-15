@@ -2,7 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 2;
+mod rotation;
+pub use rotation::*;
+
+pub const PROTOCOL_VERSION_V2: u16 = 2;
+pub const PROTOCOL_VERSION_V3: u16 = 3;
+/// The recovery-only compatibility protocol used by the original endpoints.
+pub const PROTOCOL_VERSION: u16 = PROTOCOL_VERSION_V2;
 pub const PRODUCTION_MIN_DELAY_SECS: u64 = 24 * 60 * 60;
 
 pub type Id32 = [u8; 32];

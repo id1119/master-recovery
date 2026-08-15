@@ -5,6 +5,9 @@ use gp_types::{
     ReleaseVote, SealedMessage,
 };
 
+mod rotation;
+pub use rotation::*;
+
 const MAX_FIELD_LEN: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -13,6 +16,10 @@ pub enum WireError {
     FieldTooLarge,
     #[error("invalid or incomplete frame")]
     InvalidFrame,
+    #[error("protocol value is invalid or outside its bound")]
+    InvalidValue,
+    #[error("duplicate actor id in quorum material")]
+    DuplicateActor,
 }
 
 pub fn frame(payload: &[u8]) -> Result<Vec<u8>, WireError> {
@@ -58,6 +65,10 @@ impl Transcript {
     }
 
     fn u16(&mut self, value: u16) {
+        self.0.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn u32(&mut self, value: u32) {
         self.0.extend_from_slice(&value.to_be_bytes());
     }
 

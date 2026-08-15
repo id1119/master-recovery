@@ -1,5 +1,51 @@
 # Protocol Specification
 
+## Protocol v3 Guardian Epoch amendment
+
+Protocol v2 below remains immutable and recovery-only. Protocol v3 adds the
+authoritative Guardian Rotation design from `GUARDIAN_ROTATION.md`:
+
+- `ConfigRef = (config_id, payload_generation, authorization_epoch,
+  guardian_epoch, epoch_binding)`; the computed capsule hash is separate;
+- a routine rotation increments only `guardian_epoch`, retains A, DEK,
+  payload generation and authenticated payload ciphertext, and rewrites the
+  sealed private Recovery Descriptor;
+- signer-threshold Intent contributions reveal A only to the fresh rotation
+  recipient; exact Begin, local monotonic Delay, Release and Activate votes
+  bind the plan, predecessor, successor roster commitments and recipients;
+- old guardians use ZF FROST Ristretto255 repairable threshold sharing to add
+  replacement participants, then the complete successor roster runs the
+  library's refresh-DKG; the coordinator receives provider messages and
+  ciphertext C, never a plaintext DEK share or DEK;
+- at least k committed old fragments reconstruct ciphertext C, which is
+  Reed–Solomon re-encoded and stored in fresh epoch AEAD envelopes; every
+  contributing fragment carries its complete committed record leaf and a
+  proof against the predecessor material root;
+- all n successor records must be durably PREPARED before signer Activate;
+- 3f+1 card-pinned witnesses store at most one direct child per predecessor;
+  2f+1 signed durable-write acknowledgements form the activation QC;
+- old records remain ACTIVE throughout preparation, then DRAIN only exact
+  recovery requests begun before activation, and finally retire after their
+  expiry window;
+- owner rotation cancellation is a permanent pre-activation tombstone and is
+  separate from exact recovery-request cancellation; non-owner Abort requires
+  a threshold of signer votes, so one signer cannot force rotation denial.
+  A `2f+1` witness cancellation quorum prevents an already-collected Activate
+  certificate from winning a race to QC finalization, while `n-k+1` old
+  guardian acknowledgements make the old handoff quorum impossible.
+  For a non-owner abort, signers release a predecessor plan lock only after
+  validating the threshold Abort certificate, never after one unfinalized
+  vote. For owner cancellation, they require the exact owner certificate plus
+  its `2f+1` witness-veto proof, which remains sufficient even if Activate
+  votes were already produced;
+- the guardian being replaced is not an availability dependency: an old
+  threshold performs RTS, while an online removed guardian is notified only
+  so it can enter draining and retire correctly.
+
+Every v3 recovery request binds the exact `ConfigRef`. Epoch labels are
+validated before FROST interpolation; share and fragment AEAD contexts bind
+the full reference and actor/fragment indices.
+
 ## 1. Core Objects
 
 For each protected secret:

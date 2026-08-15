@@ -1,5 +1,61 @@
 # Security Model
 
+## Protocol-v3 rotation security
+
+Guardian rotation is not a recovery authority. It requires signer-threshold
+Begin -> Delay -> Release and a second signer-threshold Activate decision.
+The setup-time owner cancellation key can permanently abort the exact rotation
+before activation. The coordinator may reconstruct A to open the private
+roster and derive per-slot grants, and may reconstruct encrypted ciphertext C;
+it never receives D_i or DEK on the ordinary RTS/refresh path.
+
+A non-owner abort needs a threshold of distinct signer votes bound to the
+exact plan and pre-activation state. One compromised signer cannot force an
+abort, and predecessor plan locks are released only after signers validate the
+assembled threshold certificate. The owner path instead unlocks signers only
+after they validate the owner certificate and its witness-veto quorum, so it
+still works in the narrow race after Activate votes. Owner cancellation is
+independently complete
+after both `2f+1` authenticated witness vetoes and `n-k+1` authenticated
+old-guardian tombstone acknowledgements. The first quorum prevents activation
+or QC finalization even if Activate votes were already collected; the second
+leaves fewer than the old handoff threshold even if signer cleanup is delayed.
+The removed guardian is never an availability dependency: the old
+threshold supplies RTS material, and an available removed guardian receives a
+best-effort activation notice only to enter draining. Each old ciphertext
+fragment contribution proves its full committed record leaf against the
+predecessor material root before reconstruction.
+
+Atomicity is old-ACTIVE/new-PREPARED until a 2f+1 witness activation QC exists.
+Every advertised successor record is required. Witness predecessor locks and
+fresh-nonce quorum reads reject forks and rollback under the stated f bound;
+an unavailable/ambiguous quorum fails closed. A request begun on the old epoch
+keeps its original delay, expiry and cancellation path while that epoch
+drains. New old-epoch Begins are forbidden after activation.
+
+Proactive security is conditional: independently refreshed epoch shares plus
+secure erasure prevent accumulation only when the attacker compromises fewer
+than the threshold within each epoch and never retains a complete threshold.
+Rotation cannot undo a previously learned DEK, plaintext or complete old
+threshold. ZF FROST and Ed25519 are classical. The selected library's later
+refresh-DKG integration needs an external review of this exact use before
+production.
+
+### Dependency-audit disposition (2026-08-14)
+
+`cargo audit` reports no known vulnerabilities and one allowed unmaintained
+warning, `RUSTSEC-2023-0089` for `atomic-polyfill 1.0.3`. It is present only in
+the all-target dependency graph through
+`frost-core 3.0.0 -> postcard 1.1.3 -> heapless 0.7.17`; the native dependency
+graph does not select it, because `heapless` uses it only for specific embedded
+targets. `frost-ristretto255 3.0.0` is the current published provider and its
+serialization feature is required for bounded authenticated protocol
+messages. The warning is therefore accepted for this native hackathon
+prototype, but those embedded targets are unsupported and production release
+remains gated on upgrading the provider chain or an external review-approved
+patch. This disposition is not a claim that the FROST integration itself has
+been audited.
+
 ## 1. Security Goals
 
 ### Content Confidentiality

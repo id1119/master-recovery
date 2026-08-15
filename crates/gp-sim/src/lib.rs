@@ -21,12 +21,17 @@ use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
 
+mod rotation;
+pub use rotation::*;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SimError {
     #[error(transparent)]
     Crypto(#[from] CryptoError),
     #[error(transparent)]
     Core(#[from] CoreError),
+    #[error(transparent)]
+    Rotation(#[from] gp_core::RotationError),
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]

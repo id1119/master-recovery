@@ -6,6 +6,13 @@ envelopes, cryptographic objects, setup, recovery, delay enforcement,
 cancellation, persistence, failure behavior, security boundaries, and the
 remaining prototype limitations.
 
+Protocol v3 adds a separate `witness` process role. Its `/v3/witness` APIs
+accept an admin-provisioned genesis capsule and pinned signer keys, verify
+exact Activate votes, durably lock one direct child, and answer fresh-nonce
+reads. Run it with `gp-network serve --role witness`; its state is stored in
+`witness-state-v3.json`. Protocol-v2 config-store endpoints remain immutable
+and are not reinterpreted as witnesses.
+
 The authoritative protocol remains `MASTER_PROMPT.md`. This runtime does not
 replace the deterministic simulator; it adds an actual socket-based execution
 path for a live distributed demo.
@@ -47,9 +54,33 @@ The following are not production network features:
   remain visible;
 - node JSON state is protected by filesystem permissions but is not encrypted
   at rest;
-- network rotation is not exposed because the authoritative documents do not
-  define a canonical threshold-authorized rotation message. Config Capsules
-  are therefore immutable in this network MVP.
+- the v3 coordinator currently executes one complete invocation in memory; a
+  process crash is safe for custody because old ACTIVE records remain intact,
+  but automatic coordinator transcript resume is not yet a production-grade
+  job service;
+- ZF FROST refresh post-dates the cited historical FROST audit, so the exact
+  RTS + refresh integration still requires external cryptographic review.
+
+The live v3 path adds the following real operations:
+
+- `setup-v3` provisions signer, guardian, and 3f+1 witness processes;
+- `rotate-v3` performs signer Intent/Begin/Release/Activate, guardian RTS and
+  full-successor refresh rounds, all-n PREPARED writes, witness activation QC,
+  atomic ACTIVE/PREPARED cutover, and old-epoch draining. It writes a private
+  rotation-control file once the cancellation window begins;
+- `cancel-rotation-v3` uses that exact plan plus the setup-time owner key to
+  persist enough old-guardian tombstones to break the handoff quorum, then
+  uses a threshold Abort certificate to erase staged state and safely unlock
+  signers for a later plan;
+- `discover-v3` resolves the highest authenticated epoch through nonce-bound
+  2f+1 witness reads;
+- `recover-v3` performs Begin -> guardian-local delay -> Release against that
+  exact epoch and reconstructs plaintext only in the client;
+- `tools/test-v3-network.sh` proves setup and pre-rotation recovery, stops the
+  guardian being replaced and one of four witnesses, owner-cancels and retries
+  an in-flight rotation, completes two live rotations with the remaining 2f+1
+  witness quorum, freshly discovers epoch 3, and performs identical
+  post-rotation recovery.
 
 ## 2. Components
 
@@ -110,10 +141,9 @@ mailboxes cannot be overwritten.
 The config store serves public/pseudonymous Config Capsules by random config
 id. Reads are public. Writes require the network administration bearer token.
 
-For this MVP each config id is write-once. A higher version cannot overwrite
-the existing value because a signed network rotation command has not been
-specified. This fail-closed restriction prevents an unauthenticated or merely
-token-bearing process from inventing a new protocol rotation behavior.
+Protocol-v2 config-store entries remain write-once. Protocol v3 does not
+overwrite them: card-pinned witness registers durably lock one direct child,
+collect an activation QC, and expose only the highest finalized capsule.
 
 The config store never receives:
 
@@ -185,6 +215,48 @@ inside that process.
 
 It tolerates unavailable signers/guardians and rejects corrupt guardian
 contributions until it has the configured number of valid responses.
+
+`gp-network recover-v3` additionally obtains a fresh witness quorum, opens the
+epoch-specific descriptor under A, checks the committed guardian record leaf,
+decrypts the epoch-specific FROST share and ciphertext-fragment envelopes, and
+rejects mixed epochs before reconstruction.
+
+### 2.7 Protocol-v3 rotation coordinator
+
+`gp-network rotate-v3` reads the non-confidential Recovery Card and the private
+mode-0600 owner-control file containing guardian administration targets. It
+obtains A only after a threshold of signers approves an exact Intent bound to a
+fresh witness view. It uses A to open the private roster and issue independent
+per-slot unwrap/wrap and fragment-envelope grants. It never receives a DEK
+share: guardian-to-guardian FROST provider payloads remain signed and X-Wing
+sealed to their exact recipients.
+
+The coordinator verifies old fragment contributions against the predecessor
+material root, reconstructs only ciphertext C, re-encodes C, gathers all
+successor PREPARED acknowledgements, obtains signer Activate votes and a
+witness QC, then notifies every participant of atomic activation. Removed
+guardians retain only already-begun recovery requests during DRAINING.
+
+Once all required guardians accept Begin, `rotate-v3` writes the private
+mode-0600 file selected by `--rotation-control`. During the delay, a separate
+owner process can run:
+
+```sh
+gp-network cancel-rotation-v3 \
+  --rotation-control rotation-v3.json \
+  --owner-control owner-control-v3.json
+```
+
+The command first requires `2f+1` authenticated witness vetoes, so an already
+collected Activate certificate cannot win a race to QC finalization. It then
+requires `n-k+1` authenticated old-guardian tombstone acknowledgements, making
+an RTS handoff quorum impossible. Before Activate it also gathers a
+threshold-signed Abort certificate to clear reachable staged state. Signers
+release their predecessor lock only after verifying either that non-owner
+threshold Abort proof or, for this owner path, the exact owner certificate plus
+the `2f+1` witness-veto proof. The latter also handles cancellation after
+Activate votes but before QC. The rotation-control file contains the private
+old/new roster and must not be published.
 
 `gp-network cancel` is a separate owner-side process. It reads the private
 owner-control file and an exact observed RecoveryRequest, signs an owner-only
@@ -495,6 +567,28 @@ PUT /v1/configs/{config-id}
 GET is public. PUT requires the network administration token. The random path
 id must exactly equal the Config Capsule's embedded config id.
 
+### 6.6 Protocol-v3 endpoints
+
+```text
+GET  /v3/node-info                         signer, guardian, witness
+POST /v3/provision                         signer, guardian
+POST /v3/aliases                           guardian administration
+POST /v3/mailbox/{opaque-id}               signer/guardian rotation
+POST /v3/recovery/{opaque-id}              signer/guardian recovery
+GET  /v3/mailboxes/{opaque-id}/key         relay key lookup
+POST /v3/mailboxes/{opaque-id}             relay rotation forwarding
+POST /v3/recovery-mailboxes/{opaque-id}    relay recovery forwarding
+POST /v3/witness/configs                   witness genesis provisioning
+POST /v3/witness/configs/{id}/read         fresh authenticated read
+POST /v3/witness/configs/{id}/activate     durable successor lock/ack
+POST /v3/witness/configs/{id}/finalize     QC-gated public activation
+POST /v3/witness/configs/{id}/cancel-rotation owner-signed durable veto
+```
+
+Rotation and recovery use distinct AEAD context labels even when they traverse
+the same opaque relay route. DPSS inner messages add their own signed plan,
+suite, session, phase, sender, recipient, and sequence binding.
+
 ## 7. Setup communication sequence
 
 ```text
@@ -784,8 +878,16 @@ Important limitations:
 11. Release votes do not contain an independently verifiable guardian-delay
     timestamp. Guardians still enforce their own delay and cancellation state,
     but “fresh after delay” signer behavior depends on honest signer policy.
-12. Signed config rotation is not defined in the authoritative message set, so
-    this network MVP does not invent it.
+12. The live v3 coordinator is an ephemeral CLI, not a replicated durable job
+    service. Actor crash state is durable and old ACTIVE custody is preserved,
+    but automatic coordinator resume after every possible crash point remains
+    operational hardening work.
+13. The exact ZF FROST RTS + refresh integration and X-Wing dependency have not
+    received an external audit for this repository. Internal tests are not a
+    substitute for that review.
+14. The v3 FROST application profile deliberately caps a guardian roster at 32
+    participants so every provider package remains inside the tested 4 KiB
+    bounds and the all-participant refresh remains a credible prototype path.
 
 ## 15. Source map
 
@@ -793,6 +895,10 @@ Important limitations:
 crates/gp-network/src/main.rs      CLI and node-role selection
 crates/gp-network/src/server.rs    HTTP servers, persistence and node actions
 crates/gp-network/src/client.rs    distributed setup/recovery orchestration
+crates/gp-network/src/rotation_coordinator.rs live v3 replacement coordinator
+crates/gp-network/src/guardian_runtime.rs v3 guardian DPSS/recovery actor
+crates/gp-network/src/rotation_runtime.rs v3 signer actor
+crates/gp-network/src/rotation_protocol.rs v3 quorum/certificate validation
 crates/gp-network/src/protocol.rs  shared setup and certificate validation
 crates/gp-network/src/types.rs     network envelopes and persisted DTOs
 crates/gp-core                     deterministic recovery/guardian machines
@@ -819,6 +925,8 @@ To understand the project from scratch:
    transitions independent of sockets and storage.
 10. Run `make network-demo`, stop nodes, inspect logs, and repeat with
     `make network-cancel`.
+11. Run `make network-v3-smoke` to exercise two real rotations and recovery
+    from the witness-selected final epoch.
 
 That path separates three concerns cleanly:
 

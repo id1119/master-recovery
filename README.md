@@ -3,6 +3,14 @@
 A working hackathon prototype of metadata-resistant, post-quantum-skewed,
 decentralized secret recovery.
 
+Protocol v3 also implements staged Guardian Epoch rotation. Replacement
+guardians are introduced with the maintained Zcash Foundation FROST
+Ristretto255 repairable-sharing API, then the full successor committee runs a
+refresh-DKG. All successor records are durably prepared before a card-pinned
+witness QC activates them; the old epoch remains recoverable until cutover and
+drains already-begun requests afterward. See `GUARDIAN_ROTATION.md` for the
+authoritative design and explicit classical/audit/secure-erasure limits.
+
 The implementation follows `MASTER_PROMPT.md`: an authorization key `A` is
 Shamir-shared to signers, the payload is encrypted with a separate `DEK`, and
 guardians receive Reed–Solomon ciphertext fragments plus DEK shares encrypted
@@ -23,6 +31,8 @@ Rust 1.97 or later is recommended.
 ```sh
 make test
 make demo
+cargo run -p gp-cli -- rotate --delay-seconds 1
+make network-v3-smoke
 ```
 
 Launch the visual simulator:
@@ -68,6 +78,28 @@ Run `make network-demo` once to provision a fresh v2 Recovery Card and private
 owner-control file. Earlier owner-cancel v2 Cards with one locator remain
 readable and simply operate without replica failover.
 
+The live protocol-v3 path is available directly from `gp-network`:
+
+```sh
+gp-network setup-v3 ...
+gp-network rotate-v3 --card card-v3.json --owner-control owner-v3.json \
+  --remove-guardian 4 --replacement-guardian http://new-guardian:8080 \
+  --rotation-control rotation-v3.json ...
+gp-network cancel-rotation-v3 --rotation-control rotation-v3.json \
+  --owner-control owner-v3.json
+gp-network discover-v3 --card card-v3.json
+gp-network recover-v3 --card card-v3.json
+```
+
+`make network-v3-smoke` starts separate TCP processes, provisions a v3 epoch,
+recovers it, takes the first guardian and one of four witnesses offline,
+owner-cancels one in-flight rotation and successfully retries it, performs two
+successive RTS + full-roster refresh rotations with the remaining 2f+1 witness
+quorum, uses the unchanged Recovery Card to discover epoch 3, and recovers the
+exact original payload again. The coordinator reports zero payload
+decryptions. Both the v3 owner-control and per-rotation control files are
+private: together they contain the cancellation authority and private roster.
+
 For a non-code explanation, presentation script, terminology guide, and twenty
 adversarial defense questions with answers, read
 [`HUMAN_GUIDE_AND_DEFENSE.md`](HUMAN_GUIDE_AND_DEFENSE.md).
@@ -112,12 +144,15 @@ Use `0` for a guardian/signer option to disable that adversarial toggle.
 ## What is real
 
 - XChaCha20-Poly1305 payload encryption and guardian-share wrapping.
-- Maintained `blahaj` Shamir secret sharing for `A` and `DEK`; the vulnerable,
+- Maintained `blahaj` Shamir secret sharing for v2 `A`/`DEK` and v3 `A`; the vulnerable,
   unpatched `sharks` dependency is not used. The wrapper enforces the protocol's
   32-byte key/share profile, rejects malformed or duplicate shares before
   reconstruction, and keeps share buffers zeroizing. See
   [`SHAMIR_AUDIT.md`](SHAMIR_AUDIT.md) for the historical compatibility matrix,
   test evidence, benchmarks, and exact non-claims.
+- Maintained Zcash Foundation `frost-ristretto255` 3.x dealer sharing, RTS
+  replacement, and full-successor refresh-DKG for the v3 DEK. No field,
+  polynomial, repair, or combiner math is implemented locally.
 - Reed–Solomon erasure coding over encrypted payload bytes.
 - SHA-256 commitments and Merkle membership proofs.
 - Canonical length-prefixed signature transcripts with domain separation.
@@ -126,6 +161,10 @@ Use `0` for a guardian/signer option to disable that adversarial toggle.
 - Exact config version, request id, recipient, nonce, actor index, and request
   digest binding.
 - Deterministic recovery and guardian state machines.
+- The same serialized `gp-core::RotationMachine` drives live guardian actors
+  and the simulator; secret provider journals are node-locally encrypted.
+- Live v3 setup, witness discovery, signer-authorized rotation, sealed direct
+  DPSS rounds, atomic activation, repeated rotation, and final recovery.
 - Owner-only hard cancellation using a per-config private key created at setup.
 - Signer-side request-id/nonce replay protection and guardian cancellation
   tombstones that survive Begin/cancel message reordering.

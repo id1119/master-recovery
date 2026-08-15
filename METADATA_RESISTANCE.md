@@ -1,5 +1,23 @@
 # Metadata Resistance
 
+## Guardian rotation
+
+The public v3 capsule and config witnesses never receive guardian routes,
+slots, keys or operator mappings. The complete predecessor/successor rosters
+remain in A-sealed descriptors and end-to-end encrypted rotation messages.
+Outer relay routes continue to use opaque mailboxes; config id, rotation id and
+guardian index are not required in outer mailbox headers.
+
+STRONG simulation applies the same fixed-size/bucketed cells, epochs, cover
+traffic, dummy packets, rotating handles and multi-hop model to rotation
+traffic. Repeated rotation timing and the fact that a participating signer or
+guardian handled some rotation remain observable residual leakage. The
+witness set sees an opaque configuration's epoch timing and capsule hashes,
+plus whether an owner-signed veto was stored, not the owner or roster. The
+mode-0600 rotation-control artifact contains both private rosters and must stay
+on the owner device. No claim of perfect or information-theoretic hiding is
+made.
+
 ## Goal
 
 Reduce the ability of a passive global observer or curious individual protocol participant to answer:

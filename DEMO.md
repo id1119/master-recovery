@@ -2,6 +2,21 @@
 
 Target runtime: approximately four minutes.
 
+## Guardian Rotation leg
+
+Run `cargo run -p gp-cli -- rotate --delay-seconds 1` or click **Run four
+rotations** in the GUI after setup. The trace demonstrates four sequential
+5-of-8 epochs, all-n preparation, signer Begin/Release/Activate phases, 3-of-4
+witness activation, old-epoch drain/retirement, zero payload decryptions during
+rotation, stable DEK commitment, and a final delayed/cancellable recovery.
+
+For the real multi-process proof, run `make network-v3-smoke`. It provisions
+independent relay, signer, guardian, and witness processes, recovers epoch 1,
+takes the guardian being replaced and one of four witnesses offline,
+owner-cancels and retries an in-flight rotation, performs two ZF FROST RTS +
+refresh rotations with the remaining 2f+1 witness quorum, discovers epoch 3
+using the unchanged Recovery Card, and verifies byte-identical recovery.
+
 ## Preparation
 
 - Use a fixed deterministic simulation seed.

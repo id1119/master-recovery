@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -16,11 +17,12 @@ use axum::{
 };
 use gp_core::GuardianMachine;
 use gp_crypto::{
-    RecipientKeyPair, XWING_PUBLIC_KEY_LEN, seal_to_recipient, sha256, sign, signing_key,
+    RecipientKeyPair, XWING_PUBLIC_KEY_LEN, merkle_commit, merkle_verify, seal_to_recipient,
+    sha256, sign, signing_key, verify, verifying_key_bytes,
 };
 use gp_types::{
-    GuardianContribution, OwnerCancelAck, PRODUCTION_MIN_DELAY_SECS, PROTOCOL_VERSION, ReleaseVote,
-    SealedMessage, SignerContribution,
+    GuardianContribution, OwnerCancelAck, PRODUCTION_MIN_DELAY_SECS, PROTOCOL_VERSION,
+    PROTOCOL_VERSION_V3, ReleaseVote, SealedMessage, SignerContribution,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::Mutex;
@@ -32,9 +34,14 @@ use crate::{
         wall_now,
     },
     types::{
-        ConfigDisk, GuardianDisk, GuardianEntry, Health, IdentityDisk, MailboxRequest,
-        MailboxResponse, NodeInfo, PendingNetworkRecovery, ProvisionAck, ProvisionPayload,
-        RelayDisk, RouteRecord, RouteRegistration, SealedMailboxBody, SignerDisk,
+        ConfigDisk, GuardianDisk, GuardianEntry, GuardianRecoveryRequestV3,
+        GuardianRotationEntryV3, GuardianRotationProvisionV3, GuardianRotationRequestV3,
+        GuardianRouteAliasV3, Health, IdentityDisk, MailboxRequest, MailboxResponse, NodeInfo,
+        PendingNetworkRecovery, ProvisionAck, ProvisionPayload, RelayDisk, RouteRecord,
+        RouteRegistration, SealedMailboxBody, SignerDisk, SignerRecoveryRequestV3,
+        SignerRotationEntryV3, SignerRotationProvisionV3, SignerRotationRequestV3,
+        WitnessActivationRequest, WitnessConfigProvision, WitnessDisk, WitnessFinalizeRequest,
+        WitnessReadEnvelope, WitnessRotationCancelRequest, WitnessRotationCancellation,
     },
 };
 
@@ -44,6 +51,7 @@ pub enum NodeRole {
     ConfigStore,
     Signer,
     Guardian,
+    Witness,
 }
 
 impl NodeRole {
@@ -53,6 +61,7 @@ impl NodeRole {
             Self::ConfigStore => "config_store",
             Self::Signer => "signer",
             Self::Guardian => "guardian",
+            Self::Witness => "witness",
         }
     }
 }
@@ -153,6 +162,11 @@ fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     #[cfg(not(unix))]
     fs::write(&temporary, bytes)?;
     fs::rename(temporary, path)?;
+    #[cfg(unix)]
+    {
+        let directory = fs::File::open(parent)?;
+        directory.sync_all()?;
+    }
     Ok(())
 }
 
@@ -172,10 +186,27 @@ fn load_identity(data_dir: &Path) -> Result<IdentityDisk> {
 fn node_info(identity: &IdentityDisk, role: NodeRole) -> NodeInfo {
     let key = RecipientKeyPair::from_seed(identity.kem_seed);
     NodeInfo {
-        protocol_version: PROTOCOL_VERSION,
+        protocol_version: if matches!(role, NodeRole::Witness) {
+            PROTOCOL_VERSION_V3
+        } else {
+            PROTOCOL_VERSION
+        },
         node_id: identity.node_id.clone(),
         role: role.as_str().into(),
         transport_public_key: key.public_key().to_vec(),
+        signing_public_key: matches!(role, NodeRole::Witness)
+            .then(|| verifying_key_bytes(&signing_key(identity.kem_seed))),
+    }
+}
+
+fn node_info_v3(identity: &IdentityDisk, role: NodeRole) -> NodeInfo {
+    let key = RecipientKeyPair::from_seed(identity.kem_seed);
+    NodeInfo {
+        protocol_version: PROTOCOL_VERSION_V3,
+        node_id: identity.node_id.clone(),
+        role: role.as_str().into(),
+        transport_public_key: key.public_key().to_vec(),
+        signing_public_key: Some(verifying_key_bytes(&signing_key(identity.kem_seed))),
     }
 }
 
@@ -212,6 +243,11 @@ pub async fn serve(config: ServeConfig) -> Result<()> {
                 .join(format!("guardian-state-v{PROTOCOL_VERSION}.json")),
             config.allow_insecure_demo_delay,
             config.corrupt_contribution,
+            config.admin_token,
+        )?,
+        NodeRole::Witness => witness_router(
+            identity,
+            config.data_dir.join("witness-state-v3.json"),
             config.admin_token,
         )?,
     }
@@ -251,6 +287,12 @@ fn relay_router(identity: Arc<IdentityDisk>, path: PathBuf, token: String) -> Re
         .route("/v1/register", post(relay_register))
         .route("/v1/mailboxes/{mailbox}/key", get(relay_key))
         .route("/v1/mailboxes/{mailbox}", post(relay_forward))
+        .route("/v3/mailboxes/{mailbox}/key", get(relay_key))
+        .route("/v3/mailboxes/{mailbox}", post(relay_forward_v3))
+        .route(
+            "/v3/recovery-mailboxes/{mailbox}",
+            post(relay_forward_recovery_v3),
+        )
         .with_state(state))
 }
 
@@ -355,6 +397,78 @@ async fn relay_forward(
         .map_err(ApiError::bad_request)
 }
 
+async fn relay_forward_v3(
+    State(state): State<RelayState>,
+    AxumPath(mailbox): AxumPath<String>,
+    Json(body): Json<SealedMailboxBody>,
+) -> Result<Json<SealedMailboxBody>, ApiError> {
+    let target = {
+        let routes = state.routes.lock().await;
+        routes
+            .data
+            .routes
+            .get(&mailbox)
+            .map(|route| route.target_url.clone())
+            .ok_or_else(|| ApiError::not_found("unknown mailbox"))?
+    };
+    let response = state
+        .client
+        .post(format!("{target}/v3/mailbox/{mailbox}"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(ApiError::bad_request)?;
+    let status = response.status();
+    if !status.is_success() {
+        let message = response.text().await.unwrap_or_default();
+        return Err(ApiError {
+            status: StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            message,
+        });
+    }
+    response
+        .json::<SealedMailboxBody>()
+        .await
+        .map(Json)
+        .map_err(ApiError::bad_request)
+}
+
+async fn relay_forward_recovery_v3(
+    State(state): State<RelayState>,
+    AxumPath(mailbox): AxumPath<String>,
+    Json(body): Json<SealedMailboxBody>,
+) -> Result<Json<SealedMailboxBody>, ApiError> {
+    let target = {
+        let routes = state.routes.lock().await;
+        routes
+            .data
+            .routes
+            .get(&mailbox)
+            .map(|route| route.target_url.clone())
+            .ok_or_else(|| ApiError::not_found("unknown mailbox"))?
+    };
+    let response = state
+        .client
+        .post(format!("{target}/v3/recovery/{mailbox}"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(ApiError::bad_request)?;
+    let status = response.status();
+    if !status.is_success() {
+        let message = response.text().await.unwrap_or_default();
+        return Err(ApiError {
+            status: StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            message,
+        });
+    }
+    response
+        .json::<SealedMailboxBody>()
+        .await
+        .map(Json)
+        .map_err(ApiError::bad_request)
+}
+
 #[derive(Clone)]
 struct ConfigState {
     identity: Arc<IdentityDisk>,
@@ -423,7 +537,7 @@ async fn config_put(
     let mut store = state.store.lock().await;
     if store.data.capsules.contains_key(&config_id) {
         return Err(ApiError::bad_request(
-            "Config Capsule is immutable in the network MVP; signed rotation is not implemented",
+            "protocol-v2 Config Capsules are immutable; rotation uses protocol-v3 witnesses",
         ));
     }
     store.data.capsules.insert(config_id.clone(), capsule);
@@ -433,6 +547,506 @@ async fn config_put(
         mailbox: config_id,
         stored: true,
     }))
+}
+
+#[derive(Clone)]
+struct WitnessServerState {
+    identity: Arc<IdentityDisk>,
+    store: Arc<Mutex<Persisted<WitnessDisk>>>,
+    admin_token: Arc<String>,
+}
+
+fn witness_router(
+    identity: Arc<IdentityDisk>,
+    path: PathBuf,
+    admin_token: String,
+) -> Result<Router> {
+    let state = WitnessServerState {
+        identity,
+        store: Arc::new(Mutex::new(Persisted {
+            data: load_json(&path)?,
+            path,
+        })),
+        admin_token: Arc::new(admin_token),
+    };
+    Ok(Router::new()
+        .route("/v3/health", get(witness_health))
+        .route("/v3/node-info", get(witness_info))
+        .route("/v3/witness/configs", post(witness_provision))
+        .route(
+            "/v3/witness/configs/{config_id}/activate",
+            post(witness_activate),
+        )
+        .route(
+            "/v3/witness/configs/{config_id}/finalize",
+            post(witness_finalize),
+        )
+        .route(
+            "/v3/witness/configs/{config_id}/cancel-rotation",
+            post(witness_cancel_rotation),
+        )
+        .route("/v3/witness/configs/{config_id}/read", post(witness_read))
+        .with_state(state))
+}
+
+async fn witness_health(State(state): State<WitnessServerState>) -> Json<Health> {
+    Json(Health {
+        status: "ok".into(),
+        role: "witness".into(),
+        node_id: state.identity.node_id.clone(),
+    })
+}
+
+async fn witness_info(State(state): State<WitnessServerState>) -> Json<NodeInfo> {
+    Json(node_info(&state.identity, NodeRole::Witness))
+}
+
+async fn witness_provision(
+    State(state): State<WitnessServerState>,
+    headers: HeaderMap,
+    Json(provision): Json<WitnessConfigProvision>,
+) -> Result<Json<ProvisionAck>, ApiError> {
+    if state.admin_token.is_empty() || bearer(&headers) != Some(state.admin_token.as_str()) {
+        return Err(ApiError::forbidden("invalid witness provisioning token"));
+    }
+    if provision.witness_id == 0
+        || provision.capsule.protocol_version != PROTOCOL_VERSION_V3
+        || provision.capsule.config_ref.guardian_epoch == 0
+        || provision.signer_public_keys.len() != usize::from(provision.capsule.signer_count)
+        || provision.witness_fault_bound == 0
+    {
+        return Err(ApiError::bad_request("invalid witness genesis policy"));
+    }
+    let computed_hash = sha256(
+        &gp_wire::config_capsule_body_v3(&provision.capsule).map_err(ApiError::bad_request)?,
+    );
+    if computed_hash != provision.capsule.capsule_hash {
+        return Err(ApiError::bad_request("invalid genesis capsule hash"));
+    }
+    let expected_signer_ids = (1..=provision.capsule.signer_count).collect::<BTreeSet<_>>();
+    if provision
+        .signer_public_keys
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        != expected_signer_ids
+    {
+        return Err(ApiError::bad_request("signer ids are not canonical"));
+    }
+    let signer_leaves = provision
+        .signer_public_keys
+        .iter()
+        .map(|(id, key)| gp_wire::signer_leaf(*id, key).map(|leaf| sha256(&leaf)))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ApiError::bad_request)?;
+    let (signer_root, _) = merkle_commit(&signer_leaves).map_err(ApiError::bad_request)?;
+    if signer_root != provision.capsule.signer_set_commitment {
+        return Err(ApiError::bad_request(
+            "pinned signer keys do not match signer-set commitment",
+        ));
+    }
+    let required_witnesses = usize::from(provision.witness_fault_bound)
+        .checked_mul(3)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| ApiError::bad_request("witness policy overflow"))?;
+    let own_witness_key = verifying_key_bytes(&signing_key(state.identity.kem_seed));
+    if provision.witness_public_keys.len() < required_witnesses
+        || provision.witness_public_keys.get(&provision.witness_id) != Some(&own_witness_key)
+        || provision
+            .witness_public_keys
+            .values()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != provision.witness_public_keys.len()
+    {
+        return Err(ApiError::bad_request("invalid pinned witness roster"));
+    }
+    let key = hex::encode(provision.capsule.config_ref.config_id);
+    let mut store = state.store.lock().await;
+    if store.data.entries.contains_key(&key) {
+        return Err(ApiError::bad_request(
+            "witness configuration is already provisioned",
+        ));
+    }
+    store.data.entries.insert(
+        key.clone(),
+        crate::types::WitnessConfigEntry {
+            witness_id: provision.witness_id,
+            register: gp_storage::WitnessEpochStore::new(
+                provision.capsule.config_ref,
+                provision.capsule.capsule_hash,
+            ),
+            capsule: provision.capsule,
+            pending_capsule: None,
+            pending_ack: None,
+            rotation_cancellations: BTreeMap::new(),
+            signer_public_keys: provision.signer_public_keys,
+            witness_public_keys: provision.witness_public_keys,
+            witness_fault_bound: provision.witness_fault_bound,
+        },
+    );
+    // save_json uses file fsync + rename + directory fsync. The provision is
+    // durable before this acknowledgement is returned.
+    store.save().map_err(ApiError::bad_request)?;
+    Ok(Json(ProvisionAck {
+        mailbox: key,
+        stored: true,
+    }))
+}
+
+async fn witness_cancel_rotation(
+    State(state): State<WitnessServerState>,
+    AxumPath(config_id): AxumPath<String>,
+    Json(request): Json<WitnessRotationCancelRequest>,
+) -> Result<Json<gp_types::WitnessRotationCancelAck>, ApiError> {
+    let certificate = request.certificate;
+    let now = wall_now().map_err(ApiError::bad_request)?;
+    if certificate.context.protocol_version != PROTOCOL_VERSION_V3
+        || hex::encode(certificate.context.config_ref.config_id) != config_id
+        || certificate.context.issued_at > now
+        || certificate.context.expiry <= now
+        || certificate.cancel_response_recipient_key.len() != XWING_PUBLIC_KEY_LEN
+    {
+        return Err(ApiError::bad_request(
+            "owner witness cancellation is malformed or expired",
+        ));
+    }
+    let cancel_transcript =
+        gp_wire::owner_rotation_cancel_certificate(&certificate).map_err(ApiError::bad_request)?;
+    let cancel_hash = sha256(&cancel_transcript);
+    let mut store = state.store.lock().await;
+    let entry = store
+        .data
+        .entries
+        .get_mut(&config_id)
+        .ok_or_else(|| ApiError::not_found("witness configuration was not found"))?;
+    if certificate.context.config_ref != entry.capsule.config_ref
+        || certificate.context.predecessor_capsule_hash != entry.capsule.capsule_hash
+        || certificate.owner_cancel_public_key != entry.capsule.owner_cancel_public_key
+    {
+        return Err(ApiError::bad_request(
+            "owner cancellation does not bind the witness's active predecessor",
+        ));
+    }
+    verify(
+        &entry.capsule.owner_cancel_public_key,
+        &cancel_transcript,
+        &certificate.owner_signature,
+    )
+    .map_err(ApiError::bad_request)?;
+    let cancellation_key = hex::encode(certificate.context.rotation_id);
+    if let Some(existing) = entry.rotation_cancellations.get(&cancellation_key) {
+        if existing.plan_hash != certificate.plan_hash
+            || existing.cancel_certificate_hash != cancel_hash
+        {
+            return Err(ApiError::bad_request(
+                "witness has a conflicting cancellation for this rotation id",
+            ));
+        }
+    } else {
+        if let Some(pending) = &entry.pending_capsule {
+            let activation = pending.activation_certificate.as_ref().ok_or_else(|| {
+                ApiError::bad_request("pending successor lacks an activation certificate")
+            })?;
+            if activation.context.rotation_id != certificate.context.rotation_id
+                || activation.plan_hash != certificate.plan_hash
+                || pending.predecessor_capsule_hash != entry.capsule.capsule_hash
+            {
+                return Err(ApiError::bad_request(
+                    "owner cancellation does not bind the pending successor",
+                ));
+            }
+            entry
+                .register
+                .cancel_pending_successor(
+                    entry.capsule.config_ref.guardian_epoch,
+                    entry.capsule.capsule_hash,
+                    pending.config_ref.guardian_epoch,
+                    pending.capsule_hash,
+                )
+                .map_err(ApiError::bad_request)?;
+            entry.pending_capsule = None;
+            entry.pending_ack = None;
+        }
+        entry.rotation_cancellations.insert(
+            cancellation_key,
+            WitnessRotationCancellation {
+                plan_hash: certificate.plan_hash,
+                cancel_certificate_hash: cancel_hash,
+            },
+        );
+    }
+    let witness_key = signing_key(state.identity.kem_seed);
+    let mut ack = gp_types::WitnessRotationCancelAck {
+        protocol_version: PROTOCOL_VERSION_V3,
+        config_id: certificate.context.config_ref.config_id,
+        rotation_id: certificate.context.rotation_id,
+        plan_hash: certificate.plan_hash,
+        cancel_certificate_hash: cancel_hash,
+        witness_id: entry.witness_id,
+        witness_public_key: verifying_key_bytes(&witness_key),
+        witness_signature: vec![],
+    };
+    ack.witness_signature = sign(
+        &witness_key,
+        &gp_wire::witness_rotation_cancel_ack(&ack).map_err(ApiError::bad_request)?,
+    );
+    // Tombstone and any pending-child rollback are durable before the signed
+    // acknowledgement leaves this witness.
+    store.save().map_err(ApiError::bad_request)?;
+    Ok(Json(ack))
+}
+
+async fn witness_activate(
+    State(state): State<WitnessServerState>,
+    AxumPath(config_id): AxumPath<String>,
+    Json(request): Json<WitnessActivationRequest>,
+) -> Result<Json<gp_types::WitnessActivationAck>, ApiError> {
+    if hex::encode(request.capsule.config_ref.config_id) != config_id {
+        return Err(ApiError::bad_request("config id path/body mismatch"));
+    }
+    let capsule_hash =
+        sha256(&gp_wire::config_capsule_body_v3(&request.capsule).map_err(ApiError::bad_request)?);
+    if capsule_hash != request.capsule.capsule_hash
+        || request.activation_certificate.successor != request.capsule.config_ref
+        || request.activation_certificate.successor_capsule_hash != capsule_hash
+        || request.capsule.predecessor_capsule_hash
+            != request
+                .activation_certificate
+                .context
+                .predecessor_capsule_hash
+    {
+        return Err(ApiError::bad_request(
+            "activation certificate does not bind the exact capsule",
+        ));
+    }
+    let activation_transcript =
+        gp_wire::rotation_activate_certificate(&request.activation_certificate)
+            .map_err(ApiError::bad_request)?;
+    let activation_hash = sha256(&activation_transcript);
+    let mut store = state.store.lock().await;
+    let entry = store
+        .data
+        .entries
+        .get_mut(&config_id)
+        .ok_or_else(|| ApiError::not_found("witness configuration was not found"))?;
+    if entry.rotation_cancellations.contains_key(&hex::encode(
+        request.activation_certificate.context.rotation_id,
+    )) {
+        return Err(ApiError::bad_request(
+            "witness permanently rejected this owner-cancelled rotation",
+        ));
+    }
+    if let Some(pending) = &entry.pending_capsule {
+        if pending.capsule_hash == request.capsule.capsule_hash {
+            return entry
+                .pending_ack
+                .clone()
+                .map(Json)
+                .ok_or_else(|| ApiError::bad_request("pending witness write has no durable ack"));
+        }
+        return Err(ApiError::bad_request(
+            "witness is already locked to another successor",
+        ));
+    }
+    if request.activation_certificate.context.config_ref != entry.capsule.config_ref
+        || request.capsule.predecessor_capsule_hash != entry.capsule.capsule_hash
+        || request.capsule.signer_count != entry.capsule.signer_count
+        || request.capsule.signer_threshold != entry.capsule.signer_threshold
+        || request.capsule.signer_set_commitment != entry.capsule.signer_set_commitment
+        || request.capsule.owner_cancel_public_key != entry.capsule.owner_cancel_public_key
+        || request.capsule.minimum_recovery_delay < entry.capsule.minimum_recovery_delay
+        || request.capsule.max_request_lifetime != entry.capsule.max_request_lifetime
+        || request.capsule.dpss_suite != entry.capsule.dpss_suite
+        || request.activation_certificate.votes.len() < usize::from(entry.capsule.signer_threshold)
+    {
+        return Err(ApiError::bad_request(
+            "stale predecessor, immutable-policy downgrade, or signer quorum failure",
+        ));
+    }
+    for vote in &request.activation_certificate.votes {
+        if entry.signer_public_keys.get(&vote.signer_id) != Some(&vote.signer_public_key) {
+            return Err(ApiError::bad_request(
+                "activate vote is not from a pinned signer",
+            ));
+        }
+        verify(
+            &vote.signer_public_key,
+            &gp_wire::signer_rotation_activate_vote(vote).map_err(ApiError::bad_request)?,
+            &vote.signer_signature,
+        )
+        .map_err(ApiError::bad_request)?;
+    }
+    entry
+        .register
+        .persist_successor_before_ack(
+            entry.capsule.config_ref,
+            entry.capsule.capsule_hash,
+            request.capsule.config_ref,
+            request.capsule.capsule_hash,
+        )
+        .map_err(ApiError::bad_request)?;
+    let predecessor = entry.capsule.clone();
+    let witness_id = entry.witness_id;
+    let successor_epoch = request.capsule.config_ref.guardian_epoch;
+    let mut stored_capsule = request.capsule;
+    stored_capsule.activation_certificate = Some(request.activation_certificate.clone());
+    stored_capsule.activation_qc = None;
+
+    let witness_key = signing_key(state.identity.kem_seed);
+    let mut ack = gp_types::WitnessActivationAck {
+        context: request.activation_certificate.context,
+        plan_hash: request.activation_certificate.plan_hash,
+        activation_certificate_hash: activation_hash,
+        witness_id,
+        predecessor_epoch: predecessor.config_ref.guardian_epoch,
+        predecessor_capsule_hash: predecessor.capsule_hash,
+        successor_epoch,
+        successor_capsule_hash: capsule_hash,
+        witness_public_key: verifying_key_bytes(&witness_key),
+        witness_signature: vec![],
+    };
+    let transcript = gp_wire::witness_activation_ack(&ack).map_err(ApiError::bad_request)?;
+    ack.witness_signature = sign(&witness_key, &transcript);
+    entry.pending_capsule = Some(stored_capsule);
+    entry.pending_ack = Some(ack.clone());
+    // Persist the successor, one-child lock, and signed ack before returning.
+    store.save().map_err(ApiError::bad_request)?;
+    Ok(Json(ack))
+}
+
+async fn witness_finalize(
+    State(state): State<WitnessServerState>,
+    AxumPath(config_id): AxumPath<String>,
+    Json(request): Json<WitnessFinalizeRequest>,
+) -> Result<Json<ProvisionAck>, ApiError> {
+    let mut store = state.store.lock().await;
+    let entry = store
+        .data
+        .entries
+        .get_mut(&config_id)
+        .ok_or_else(|| ApiError::not_found("witness configuration was not found"))?;
+    let pending = entry
+        .pending_capsule
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("witness has no pending successor"))?;
+    let pending_ack = entry
+        .pending_ack
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request("pending successor has no witness ack"))?;
+    let qc = &request.activation_qc;
+    if entry
+        .rotation_cancellations
+        .contains_key(&hex::encode(qc.rotation_id))
+    {
+        return Err(ApiError::bad_request(
+            "witness refuses to finalize an owner-cancelled rotation",
+        ));
+    }
+    gp_wire::epoch_activation_qc(qc).map_err(ApiError::bad_request)?;
+    if qc.config_id != pending.config_ref.config_id
+        || hex::encode(qc.config_id) != config_id
+        || qc.witness_fault_bound != entry.witness_fault_bound
+        || qc.rotation_id != pending_ack.context.rotation_id
+        || qc.predecessor_epoch != pending_ack.predecessor_epoch
+        || qc.predecessor_capsule_hash != pending_ack.predecessor_capsule_hash
+        || qc.successor_epoch != pending.config_ref.guardian_epoch
+        || qc.successor_capsule_hash != pending.capsule_hash
+        || qc.activation_certificate_hash != pending_ack.activation_certificate_hash
+    {
+        return Err(ApiError::bad_request(
+            "activation QC does not bind the pending successor",
+        ));
+    }
+    let required = usize::from(entry.witness_fault_bound)
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| ApiError::bad_request("witness quorum overflow"))?;
+    let mut witness_ids = BTreeSet::new();
+    for ack in &qc.witness_acks {
+        let pinned = entry
+            .witness_public_keys
+            .get(&ack.witness_id)
+            .ok_or_else(|| ApiError::bad_request("QC contains an unpinned witness"))?;
+        if !witness_ids.insert(ack.witness_id) || pinned != &ack.witness_public_key {
+            return Err(ApiError::bad_request(
+                "QC contains duplicate or substituted witnesses",
+            ));
+        }
+        verify(
+            pinned,
+            &gp_wire::witness_activation_ack(ack).map_err(ApiError::bad_request)?,
+            &ack.witness_signature,
+        )
+        .map_err(ApiError::bad_request)?;
+    }
+    if witness_ids.len() < required
+        || !qc
+            .witness_acks
+            .iter()
+            .any(|ack| ack.witness_id == entry.witness_id && ack == pending_ack)
+    {
+        return Err(ApiError::bad_request(
+            "QC has no 2f+1 quorum or omits this witness's exact ack",
+        ));
+    }
+    let mut activated = entry
+        .pending_capsule
+        .take()
+        .expect("pending capsule checked above");
+    activated.activation_qc = Some(request.activation_qc);
+    entry.capsule = activated;
+    entry.pending_ack = None;
+    store.save().map_err(ApiError::bad_request)?;
+    Ok(Json(ProvisionAck {
+        mailbox: config_id,
+        stored: true,
+    }))
+}
+
+async fn witness_read(
+    State(state): State<WitnessServerState>,
+    AxumPath(config_id): AxumPath<String>,
+    Json(challenge): Json<gp_types::EpochReadChallenge>,
+) -> Result<Json<WitnessReadEnvelope>, ApiError> {
+    if challenge.protocol_version != PROTOCOL_VERSION_V3
+        || hex::encode(challenge.config_id) != config_id
+    {
+        return Err(ApiError::bad_request("invalid witness read challenge"));
+    }
+    let now = wall_now().map_err(ApiError::bad_request)?;
+    if challenge.issued_at > now || now >= challenge.expiry {
+        return Err(ApiError::bad_request("expired witness read challenge"));
+    }
+    gp_wire::epoch_read_challenge(&challenge).map_err(ApiError::bad_request)?;
+    let mut store = state.store.lock().await;
+    let entry = store
+        .data
+        .entries
+        .get_mut(&config_id)
+        .ok_or_else(|| ApiError::not_found("witness configuration was not found"))?;
+    entry
+        .register
+        .observe_read_nonce(challenge.client_nonce)
+        .map_err(ApiError::bad_request)?;
+    let capsule = entry.capsule.clone();
+    let witness_id = entry.witness_id;
+    store.save().map_err(ApiError::bad_request)?;
+    let witness_key = signing_key(state.identity.kem_seed);
+    let mut response = gp_types::WitnessEpochReadResponse {
+        protocol_version: PROTOCOL_VERSION_V3,
+        config_id: challenge.config_id,
+        client_nonce: challenge.client_nonce,
+        witness_id,
+        highest_guardian_epoch: capsule.config_ref.guardian_epoch,
+        capsule_hash: capsule.capsule_hash,
+        witness_public_key: verifying_key_bytes(&witness_key),
+        witness_signature: vec![],
+    };
+    let transcript =
+        gp_wire::witness_epoch_read_response(&response).map_err(ApiError::bad_request)?;
+    response.witness_signature = sign(&witness_key, &transcript);
+    Ok(Json(WitnessReadEnvelope { response, capsule }))
 }
 
 #[derive(Clone)]
@@ -461,8 +1075,12 @@ fn signer_router(
     Ok(Router::new()
         .route("/v1/health", get(signer_health))
         .route("/v1/node-info", get(signer_info))
+        .route("/v3/node-info", get(signer_info_v3))
         .route("/v1/provision", post(signer_provision))
         .route("/v1/mailbox/{mailbox}", post(signer_mailbox))
+        .route("/v3/provision", post(signer_rotation_provision))
+        .route("/v3/mailbox/{mailbox}", post(signer_rotation_mailbox))
+        .route("/v3/recovery/{mailbox}", post(signer_recovery_mailbox_v3))
         .with_state(state))
 }
 
@@ -476,6 +1094,10 @@ async fn signer_health(State(state): State<SignerServerState>) -> Json<Health> {
 
 async fn signer_info(State(state): State<SignerServerState>) -> Json<NodeInfo> {
     Json(node_info(&state.identity, NodeRole::Signer))
+}
+
+async fn signer_info_v3(State(state): State<SignerServerState>) -> Json<NodeInfo> {
+    Json(node_info_v3(&state.identity, NodeRole::Signer))
 }
 
 fn open_provision(
@@ -517,6 +1139,174 @@ async fn signer_provision(
         mailbox,
         stored: true,
     }))
+}
+
+async fn signer_rotation_provision(
+    State(state): State<SignerServerState>,
+    headers: HeaderMap,
+    Json(body): Json<SealedMailboxBody>,
+) -> Result<Json<ProvisionAck>, ApiError> {
+    if state.admin_token.is_empty() || bearer(&headers) != Some(state.admin_token.as_str()) {
+        return Err(ApiError::forbidden("invalid node provisioning token"));
+    }
+    let recipient = RecipientKeyPair::from_seed(state.identity.kem_seed);
+    let plaintext = recipient
+        .open(
+            &body.sealed,
+            &gp_wire::node_provision_context(&state.identity.node_id, "signer-v3")
+                .map_err(ApiError::bad_request)?,
+        )
+        .map_err(ApiError::bad_request)?;
+    let provision: SignerRotationProvisionV3 =
+        serde_json::from_slice(&plaintext).map_err(ApiError::bad_request)?;
+    crate::rotation_protocol::validate_activated_capsule_v3(
+        &provision.recovery_card,
+        &provision.active_capsule,
+    )
+    .map_err(ApiError::bad_request)?;
+    if provision.signer_id == 0
+        || provision.signer_id > provision.active_capsule.signer_count
+        || provision.signing_public_key != verifying_key_bytes(&signing_key(provision.signing_seed))
+    {
+        return Err(ApiError::bad_request("invalid protocol-v3 signer identity"));
+    }
+    let signer_leaf = sha256(
+        &gp_wire::signer_leaf(provision.signer_id, &provision.signing_public_key)
+            .map_err(ApiError::bad_request)?,
+    );
+    merkle_verify(
+        provision.active_capsule.signer_set_commitment,
+        signer_leaf,
+        usize::from(provision.signer_id - 1),
+        usize::from(provision.active_capsule.signer_count),
+        &provision.membership_proof,
+    )
+    .map_err(ApiError::bad_request)?;
+    let mailbox = mailbox_id(&provision.mailbox).map_err(ApiError::bad_request)?;
+    let mut store = state.store.lock().await;
+    if store.data.rotation_entries.contains_key(&mailbox) {
+        return Err(ApiError::bad_request(
+            "protocol-v3 signer mailbox is already provisioned",
+        ));
+    }
+    store.data.rotation_entries.insert(
+        mailbox.clone(),
+        SignerRotationEntryV3 {
+            provision,
+            security_state: gp_storage::SignerRotationStore::new(),
+            recovery_requests: BTreeMap::new(),
+            recovery_nonces: BTreeSet::new(),
+        },
+    );
+    store.save().map_err(ApiError::bad_request)?;
+    Ok(Json(ProvisionAck {
+        mailbox,
+        stored: true,
+    }))
+}
+
+async fn signer_rotation_mailbox(
+    State(state): State<SignerServerState>,
+    AxumPath(mailbox): AxumPath<String>,
+    Json(body): Json<SealedMailboxBody>,
+) -> Result<Json<SealedMailboxBody>, ApiError> {
+    if !state.auto_approve {
+        return Err(ApiError::forbidden(
+            "automatic social approval is disabled on this signer",
+        ));
+    }
+    let recipient = RecipientKeyPair::from_seed(state.identity.kem_seed);
+    let plaintext = recipient
+        .open(
+            &body.sealed,
+            &gp_wire::mailbox_transport_context(&mailbox, "rotation-request")
+                .map_err(ApiError::bad_request)?,
+        )
+        .map_err(ApiError::bad_request)?;
+    let request: SignerRotationRequestV3 =
+        serde_json::from_slice(&plaintext).map_err(ApiError::bad_request)?;
+    let response_recipient_key = match &request {
+        SignerRotationRequestV3::Abort {
+            response_recipient_key,
+            ..
+        }
+        | SignerRotationRequestV3::FinalizeAbort {
+            response_recipient_key,
+            ..
+        }
+        | SignerRotationRequestV3::FinalizeOwnerCancel {
+            response_recipient_key,
+            ..
+        } => response_recipient_key.clone(),
+        _ => request.context().recipient_key.clone(),
+    };
+    let now = wall_now().map_err(ApiError::bad_request)?;
+    let mut store = state.store.lock().await;
+    let entry = store
+        .data
+        .rotation_entries
+        .get_mut(&mailbox)
+        .ok_or_else(|| ApiError::not_found("protocol-v3 signer mailbox is not provisioned"))?;
+    let response = crate::rotation_runtime::handle_signer_rotation_v3(entry, request, now)
+        .map_err(ApiError::bad_request)?;
+    store.save().map_err(ApiError::bad_request)?;
+    let bytes = serde_json::to_vec(&response).map_err(ApiError::bad_request)?;
+    let sealed = seal_to_recipient(
+        &response_recipient_key,
+        random_id(),
+        random_nonce(),
+        &bytes,
+        &gp_wire::mailbox_transport_context(&mailbox, "rotation-response")
+            .map_err(ApiError::bad_request)?,
+    )
+    .map_err(ApiError::bad_request)?;
+    Ok(Json(SealedMailboxBody { sealed }))
+}
+
+async fn signer_recovery_mailbox_v3(
+    State(state): State<SignerServerState>,
+    AxumPath(mailbox): AxumPath<String>,
+    Json(body): Json<SealedMailboxBody>,
+) -> Result<Json<SealedMailboxBody>, ApiError> {
+    if !state.auto_approve {
+        return Err(ApiError::forbidden(
+            "automatic social approval is disabled on this signer",
+        ));
+    }
+    let recipient = RecipientKeyPair::from_seed(state.identity.kem_seed);
+    let plaintext = recipient
+        .open(
+            &body.sealed,
+            &gp_wire::mailbox_transport_context(&mailbox, "recovery-request-v3")
+                .map_err(ApiError::bad_request)?,
+        )
+        .map_err(ApiError::bad_request)?;
+    let request: SignerRecoveryRequestV3 =
+        serde_json::from_slice(&plaintext).map_err(ApiError::bad_request)?;
+    let response_recipient_key = match &request {
+        SignerRecoveryRequestV3::Approve { request, .. }
+        | SignerRecoveryRequestV3::Release { request } => request.recovery_recipient_key.clone(),
+    };
+    let now = wall_now().map_err(ApiError::bad_request)?;
+    let mut store = state.store.lock().await;
+    let entry = store
+        .data
+        .rotation_entries
+        .get_mut(&mailbox)
+        .ok_or_else(|| ApiError::not_found("protocol-v3 signer mailbox is not provisioned"))?;
+    let response = crate::recovery_runtime::handle_signer_recovery_v3(entry, request, now)
+        .map_err(ApiError::bad_request)?;
+    store.save().map_err(ApiError::bad_request)?;
+    let sealed = seal_to_recipient(
+        &response_recipient_key,
+        random_id(),
+        random_nonce(),
+        &serde_json::to_vec(&response).map_err(ApiError::bad_request)?,
+        &gp_wire::mailbox_transport_context(&mailbox, "recovery-response-v3")
+            .map_err(ApiError::bad_request)?,
+    )
+    .map_err(ApiError::bad_request)?;
+    Ok(Json(SealedMailboxBody { sealed }))
 }
 
 fn open_mailbox_request(
@@ -720,8 +1510,13 @@ fn guardian_router(
     Ok(Router::new()
         .route("/v1/health", get(guardian_health))
         .route("/v1/node-info", get(guardian_info))
+        .route("/v3/node-info", get(guardian_info_v3))
         .route("/v1/provision", post(guardian_provision))
         .route("/v1/mailbox/{mailbox}", post(guardian_mailbox))
+        .route("/v3/provision", post(guardian_rotation_provision))
+        .route("/v3/aliases", post(guardian_rotation_alias))
+        .route("/v3/mailbox/{mailbox}", post(guardian_rotation_mailbox))
+        .route("/v3/recovery/{mailbox}", post(guardian_recovery_mailbox_v3))
         .with_state(state))
 }
 
@@ -735,6 +1530,10 @@ async fn guardian_health(State(state): State<GuardianServerState>) -> Json<Healt
 
 async fn guardian_info(State(state): State<GuardianServerState>) -> Json<NodeInfo> {
     Json(node_info(&state.identity, NodeRole::Guardian))
+}
+
+async fn guardian_info_v3(State(state): State<GuardianServerState>) -> Json<NodeInfo> {
+    Json(node_info_v3(&state.identity, NodeRole::Guardian))
 }
 
 async fn guardian_provision(
@@ -773,6 +1572,237 @@ async fn guardian_provision(
         mailbox,
         stored: true,
     }))
+}
+
+async fn guardian_rotation_provision(
+    State(state): State<GuardianServerState>,
+    headers: HeaderMap,
+    Json(body): Json<SealedMailboxBody>,
+) -> Result<Json<ProvisionAck>, ApiError> {
+    if state.admin_token.is_empty() || bearer(&headers) != Some(state.admin_token.as_str()) {
+        return Err(ApiError::forbidden("invalid node provisioning token"));
+    }
+    let recipient = RecipientKeyPair::from_seed(state.identity.kem_seed);
+    let plaintext = recipient
+        .open(
+            &body.sealed,
+            &gp_wire::node_provision_context(&state.identity.node_id, "guardian-v3")
+                .map_err(ApiError::bad_request)?,
+        )
+        .map_err(ApiError::bad_request)?;
+    let provision: GuardianRotationProvisionV3 =
+        serde_json::from_slice(&plaintext).map_err(ApiError::bad_request)?;
+    crate::rotation_protocol::validate_activated_capsule_v3(
+        &provision.recovery_card,
+        &provision.predecessor_capsule,
+    )
+    .map_err(ApiError::bad_request)?;
+    if provision.signing_public_key != verifying_key_bytes(&signing_key(provision.signing_seed))
+        || provision.epoch_store.config_id != provision.predecessor_capsule.config_ref.config_id
+        || provision.epoch_store.expected_predecessor != provision.predecessor_capsule.config_ref
+        || provision.epoch_store.expected_predecessor_capsule_hash
+            != provision.predecessor_capsule.capsule_hash
+    {
+        return Err(ApiError::bad_request(
+            "guardian provision does not bind the exact predecessor and identity",
+        ));
+    }
+    for (id, key) in &provision.signer_public_keys {
+        if *id == 0 || *id > provision.predecessor_capsule.signer_count {
+            return Err(ApiError::bad_request("guardian signer pin is out of range"));
+        }
+        // A partial cache is only an optimization. Every certificate carries
+        // a Merkle proof against the capsule-pinned root.
+        let _ = gp_wire::signer_leaf(*id, key).map_err(ApiError::bad_request)?;
+    }
+    if provision.predecessor_capsule.minimum_recovery_delay < PRODUCTION_MIN_DELAY_SECS
+        && !state.allow_insecure_demo_delay
+    {
+        return Err(ApiError::forbidden(
+            "guardian refuses a v3 delay below 24 hours outside explicit demo mode",
+        ));
+    }
+    let mailbox = mailbox_id(&provision.mailbox).map_err(ApiError::bad_request)?;
+    let mut store = state.store.lock().await;
+    if store.data.rotation_entries.contains_key(&mailbox) {
+        return Err(ApiError::bad_request(
+            "protocol-v3 guardian mailbox is already provisioned",
+        ));
+    }
+    store.data.rotation_entries.insert(
+        mailbox.clone(),
+        GuardianRotationEntryV3 {
+            provision,
+            sessions: BTreeMap::new(),
+            recoveries: BTreeMap::new(),
+        },
+    );
+    store.save().map_err(ApiError::bad_request)?;
+    Ok(Json(ProvisionAck {
+        mailbox,
+        stored: true,
+    }))
+}
+
+async fn guardian_rotation_alias(
+    State(state): State<GuardianServerState>,
+    headers: HeaderMap,
+    Json(alias): Json<GuardianRouteAliasV3>,
+) -> Result<Json<ProvisionAck>, ApiError> {
+    if state.admin_token.is_empty() || bearer(&headers) != Some(state.admin_token.as_str()) {
+        return Err(ApiError::forbidden("invalid node provisioning token"));
+    }
+    if alias.mailbox.len() < 32 || alias.existing_mailbox.len() < 32 {
+        return Err(ApiError::bad_request(
+            "invalid opaque guardian mailbox alias",
+        ));
+    }
+    let mut store = state.store.lock().await;
+    let existing_primary = store
+        .data
+        .rotation_aliases
+        .get(&alias.existing_mailbox)
+        .cloned()
+        .unwrap_or_else(|| alias.existing_mailbox.clone());
+    if !store.data.rotation_entries.contains_key(&existing_primary)
+        || store.data.rotation_entries.contains_key(&alias.mailbox)
+        || store.data.rotation_aliases.contains_key(&alias.mailbox)
+        || alias.mailbox == existing_primary
+    {
+        return Err(ApiError::bad_request(
+            "alias target is missing or alias already exists",
+        ));
+    }
+    store
+        .data
+        .rotation_aliases
+        .insert(alias.mailbox.clone(), existing_primary);
+    store.save().map_err(ApiError::bad_request)?;
+    Ok(Json(ProvisionAck {
+        mailbox: alias.mailbox,
+        stored: true,
+    }))
+}
+
+async fn guardian_rotation_mailbox(
+    State(state): State<GuardianServerState>,
+    AxumPath(mailbox): AxumPath<String>,
+    Json(body): Json<SealedMailboxBody>,
+) -> Result<Json<SealedMailboxBody>, ApiError> {
+    let recipient = RecipientKeyPair::from_seed(state.identity.kem_seed);
+    let plaintext = recipient
+        .open(
+            &body.sealed,
+            &gp_wire::mailbox_transport_context(&mailbox, "rotation-request")
+                .map_err(ApiError::bad_request)?,
+        )
+        .map_err(ApiError::bad_request)?;
+    let request: GuardianRotationRequestV3 =
+        serde_json::from_slice(&plaintext).map_err(ApiError::bad_request)?;
+    let response_recipient_key = match &request {
+        GuardianRotationRequestV3::Cancel { certificate, .. } => {
+            certificate.cancel_response_recipient_key.clone()
+        }
+        _ => request.context().recipient_key.clone(),
+    };
+    let wall = wall_now().map_err(ApiError::bad_request)?;
+    let monotonic = monotonic_now().map_err(ApiError::bad_request)?;
+    let current_boot = boot_id();
+    let mut store = state.store.lock().await;
+    let primary_mailbox = store
+        .data
+        .rotation_aliases
+        .get(&mailbox)
+        .cloned()
+        .unwrap_or_else(|| mailbox.clone());
+    let entry = store
+        .data
+        .rotation_entries
+        .get_mut(&primary_mailbox)
+        .ok_or_else(|| ApiError::not_found("protocol-v3 guardian mailbox is not provisioned"))?;
+    let response = crate::guardian_runtime::handle_guardian_rotation_v3(
+        entry,
+        &state.identity.kem_seed,
+        request,
+        wall,
+        monotonic,
+        &current_boot,
+        state.allow_insecure_demo_delay,
+    )
+    .map_err(ApiError::bad_request)?;
+    // Persist ACTIVE/PREPARED state, replay counters and encrypted provider
+    // journal before returning any ack or outbound DPSS message.
+    store.save().map_err(ApiError::bad_request)?;
+    let bytes = serde_json::to_vec(&response).map_err(ApiError::bad_request)?;
+    let sealed = seal_to_recipient(
+        &response_recipient_key,
+        random_id(),
+        random_nonce(),
+        &bytes,
+        &gp_wire::mailbox_transport_context(&mailbox, "rotation-response")
+            .map_err(ApiError::bad_request)?,
+    )
+    .map_err(ApiError::bad_request)?;
+    Ok(Json(SealedMailboxBody { sealed }))
+}
+
+async fn guardian_recovery_mailbox_v3(
+    State(state): State<GuardianServerState>,
+    AxumPath(mailbox): AxumPath<String>,
+    Json(body): Json<SealedMailboxBody>,
+) -> Result<Json<SealedMailboxBody>, ApiError> {
+    let recipient = RecipientKeyPair::from_seed(state.identity.kem_seed);
+    let plaintext = recipient
+        .open(
+            &body.sealed,
+            &gp_wire::mailbox_transport_context(&mailbox, "recovery-request-v3")
+                .map_err(ApiError::bad_request)?,
+        )
+        .map_err(ApiError::bad_request)?;
+    let request: GuardianRecoveryRequestV3 =
+        serde_json::from_slice(&plaintext).map_err(ApiError::bad_request)?;
+    let response_recipient_key = match &request {
+        GuardianRecoveryRequestV3::Cancel { certificate, .. } => {
+            certificate.cancel_response_recipient_key.clone()
+        }
+        _ => request.request().recovery_recipient_key.clone(),
+    };
+    let wall = wall_now().map_err(ApiError::bad_request)?;
+    let monotonic = monotonic_now().map_err(ApiError::bad_request)?;
+    let current_boot = boot_id();
+    let mut store = state.store.lock().await;
+    let primary_mailbox = store
+        .data
+        .rotation_aliases
+        .get(&mailbox)
+        .cloned()
+        .unwrap_or_else(|| mailbox.clone());
+    let entry = store
+        .data
+        .rotation_entries
+        .get_mut(&primary_mailbox)
+        .ok_or_else(|| ApiError::not_found("protocol-v3 guardian mailbox is not provisioned"))?;
+    let response = crate::recovery_runtime::handle_guardian_recovery_v3(
+        entry,
+        request,
+        wall,
+        monotonic,
+        &current_boot,
+        state.allow_insecure_demo_delay,
+    )
+    .map_err(ApiError::bad_request)?;
+    // Delay/cancellation/release state is durable before any response leaves.
+    store.save().map_err(ApiError::bad_request)?;
+    let sealed = seal_to_recipient(
+        &response_recipient_key,
+        random_id(),
+        random_nonce(),
+        &serde_json::to_vec(&response).map_err(ApiError::bad_request)?,
+        &gp_wire::mailbox_transport_context(&mailbox, "recovery-response-v3")
+            .map_err(ApiError::bad_request)?,
+    )
+    .map_err(ApiError::bad_request)?;
+    Ok(Json(SealedMailboxBody { sealed }))
 }
 
 fn monotonic_now() -> Result<u64> {
@@ -967,4 +1997,362 @@ fn mailbox_id(mailbox_url: &str) -> Result<String> {
         .filter(|value| value.len() >= 32)
         .map(str::to_owned)
         .context("invalid opaque mailbox URL")
+}
+
+#[cfg(test)]
+mod rotation_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    use gp_types::{
+        AeadCiphertext, ConfigCapsuleV3, ConfigRef, DpssSuiteId, EpochActivationQc,
+        EpochReadChallenge, Id32, OwnerRotationCancelCertificate, RotationActivateCertificate,
+        RotationContext, SignerRotationActivateVote,
+    };
+
+    fn config_ref(epoch: u64, marker: u8) -> ConfigRef {
+        ConfigRef {
+            config_id: [1; 32],
+            payload_generation: 1,
+            authorization_epoch: 1,
+            guardian_epoch: epoch,
+            epoch_binding: [marker; 32],
+        }
+    }
+
+    fn capsule(config_ref: ConfigRef, predecessor: Id32) -> ConfigCapsuleV3 {
+        let mut value = ConfigCapsuleV3 {
+            protocol_version: PROTOCOL_VERSION_V3,
+            config_ref,
+            capsule_hash: [0; 32],
+            predecessor_capsule_hash: predecessor,
+            signer_count: 3,
+            signer_threshold: 2,
+            guardian_count: 8,
+            guardian_threshold: 5,
+            minimum_recovery_delay: 10,
+            max_request_lifetime: 100,
+            signer_set_commitment: [3; 32],
+            owner_cancel_public_key: [4; 32],
+            dpss_suite: DpssSuiteId::default(),
+            dpss_public_commitment: [5; 32],
+            guardian_material_root: [6; 32],
+            encrypted_recovery_descriptor: AeadCiphertext {
+                nonce: [7; 24],
+                ciphertext: vec![8; 64],
+            },
+            activation_certificate: None,
+            activation_qc: None,
+        };
+        value.capsule_hash = sha256(&gp_wire::config_capsule_body_v3(&value).unwrap());
+        value
+    }
+
+    fn activation(
+        predecessor: &ConfigCapsuleV3,
+        successor: &ConfigCapsuleV3,
+        signer_seeds: &[Id32],
+        membership_proofs: &[Vec<u8>],
+        rotation_id: Id32,
+    ) -> RotationActivateCertificate {
+        let now = wall_now().unwrap();
+        let context = RotationContext {
+            protocol_version: PROTOCOL_VERSION_V3,
+            config_ref: predecessor.config_ref,
+            rotation_id,
+            predecessor_capsule_hash: predecessor.capsule_hash,
+            recipient_key: vec![11; 32],
+            nonce: [12; 32],
+            issued_at: now,
+            expiry: now + 100,
+        };
+        let mut votes = Vec::new();
+        for ((offset, seed), proof) in signer_seeds.iter().enumerate().zip(membership_proofs) {
+            let key = signing_key(*seed);
+            let mut vote = SignerRotationActivateVote {
+                context: context.clone(),
+                plan_hash: [13; 32],
+                ready_certificate_hash: [14; 32],
+                successor_capsule_hash: successor.capsule_hash,
+                signer_id: u16::try_from(offset + 1).unwrap(),
+                signer_public_key: verifying_key_bytes(&key),
+                signer_membership_proof: proof.clone(),
+                signer_signature: vec![],
+            };
+            vote.signer_signature = sign(
+                &key,
+                &gp_wire::signer_rotation_activate_vote(&vote).unwrap(),
+            );
+            votes.push(vote);
+        }
+        RotationActivateCertificate {
+            context,
+            plan_hash: [13; 32],
+            ready_certificate_hash: [14; 32],
+            successor: successor.config_ref,
+            successor_capsule_hash: successor.capsule_hash,
+            votes,
+        }
+    }
+
+    #[tokio::test]
+    async fn witness_persists_one_child_and_nonce_bound_reads_across_restart() {
+        let temp =
+            std::env::temp_dir().join(format!("gp-witness-test-{}", hex::encode(random_id())));
+        fs::create_dir_all(&temp).unwrap();
+        let path = temp.join("state.json");
+        let identity = Arc::new(IdentityDisk {
+            node_id: "witness-test".into(),
+            kem_seed: [20; 32],
+        });
+        let state = WitnessServerState {
+            identity,
+            store: Arc::new(Mutex::new(Persisted {
+                path: path.clone(),
+                data: WitnessDisk::default(),
+            })),
+            admin_token: Arc::new("test-token".into()),
+        };
+        let signer_seeds = [[21; 32], [22; 32], [23; 32]];
+        let signer_public_keys = signer_seeds
+            .iter()
+            .enumerate()
+            .map(|(offset, seed)| {
+                (
+                    u16::try_from(offset + 1).unwrap(),
+                    verifying_key_bytes(&signing_key(*seed)),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let signer_leaves = signer_public_keys
+            .iter()
+            .map(|(id, key)| sha256(&gp_wire::signer_leaf(*id, key).unwrap()))
+            .collect::<Vec<_>>();
+        let (signer_root, signer_proofs) = merkle_commit(&signer_leaves).unwrap();
+        let mut genesis = capsule(config_ref(1, 1), [0; 32]);
+        genesis.signer_set_commitment = signer_root;
+        let owner_cancel_seed = [44; 32];
+        genesis.owner_cancel_public_key = verifying_key_bytes(&signing_key(owner_cancel_seed));
+        genesis.capsule_hash = sha256(&gp_wire::config_capsule_body_v3(&genesis).unwrap());
+        let witness_seeds = [[20; 32], [40; 32], [41; 32], [42; 32]];
+        let witness_public_keys = witness_seeds
+            .iter()
+            .enumerate()
+            .map(|(offset, seed)| {
+                (
+                    u16::try_from(offset + 1).unwrap(),
+                    verifying_key_bytes(&signing_key(*seed)),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer test-token".parse().unwrap());
+        let _ = witness_provision(
+            State(state.clone()),
+            headers,
+            Json(WitnessConfigProvision {
+                witness_id: 1,
+                capsule: genesis.clone(),
+                signer_public_keys,
+                witness_public_keys,
+                witness_fault_bound: 1,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let mut successor = capsule(config_ref(2, 2), genesis.capsule_hash);
+        successor.signer_set_commitment = signer_root;
+        successor.owner_cancel_public_key = genesis.owner_cancel_public_key;
+        successor.capsule_hash = sha256(&gp_wire::config_capsule_body_v3(&successor).unwrap());
+        let certificate = activation(
+            &genesis,
+            &successor,
+            &signer_seeds[..2],
+            &signer_proofs[..2],
+            [10; 32],
+        );
+        let ack = witness_activate(
+            State(state.clone()),
+            AxumPath(hex::encode(genesis.config_ref.config_id)),
+            Json(WitnessActivationRequest {
+                capsule: successor.clone(),
+                activation_certificate: certificate.clone(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        verify(
+            &ack.witness_public_key,
+            &gp_wire::witness_activation_ack(&ack).unwrap(),
+            &ack.witness_signature,
+        )
+        .unwrap();
+
+        // A merely stored successor has no recovery authority before 2f+1 QC.
+        let before_qc_challenge = EpochReadChallenge {
+            protocol_version: PROTOCOL_VERSION_V3,
+            config_id: genesis.config_ref.config_id,
+            client_nonce: [29; 32],
+            response_recipient_key: vec![31; 32],
+            issued_at: wall_now().unwrap(),
+            expiry: wall_now().unwrap() + 100,
+        };
+        let before_qc = witness_read(
+            State(state.clone()),
+            AxumPath(hex::encode(genesis.config_ref.config_id)),
+            Json(before_qc_challenge),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(before_qc.response.highest_guardian_epoch, 1);
+
+        // Owner cancellation wins immediately before QC finalization, rolls
+        // back only the pending witness child, and permanently rejects the
+        // cancelled rotation id.
+        let cancel_recipient = RecipientKeyPair::from_seed([45; 32]);
+        let mut cancellation = OwnerRotationCancelCertificate {
+            context: certificate.context.clone(),
+            plan_hash: certificate.plan_hash,
+            reason_code: 1,
+            cancel_response_recipient_key: cancel_recipient.public_key().to_vec(),
+            owner_cancel_public_key: genesis.owner_cancel_public_key,
+            owner_signature: vec![],
+        };
+        cancellation.owner_signature = sign(
+            &signing_key(owner_cancel_seed),
+            &gp_wire::owner_rotation_cancel_certificate(&cancellation).unwrap(),
+        );
+        let mut forged_cancellation = cancellation.clone();
+        forged_cancellation.owner_signature[0] ^= 1;
+        assert!(
+            witness_cancel_rotation(
+                State(state.clone()),
+                AxumPath(hex::encode(genesis.config_ref.config_id)),
+                Json(WitnessRotationCancelRequest {
+                    certificate: forged_cancellation,
+                }),
+            )
+            .await
+            .is_err()
+        );
+        let cancel_ack = witness_cancel_rotation(
+            State(state.clone()),
+            AxumPath(hex::encode(genesis.config_ref.config_id)),
+            Json(WitnessRotationCancelRequest {
+                certificate: cancellation,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        verify(
+            &cancel_ack.witness_public_key,
+            &gp_wire::witness_rotation_cancel_ack(&cancel_ack).unwrap(),
+            &cancel_ack.witness_signature,
+        )
+        .unwrap();
+        assert!(
+            witness_activate(
+                State(state.clone()),
+                AxumPath(hex::encode(genesis.config_ref.config_id)),
+                Json(WitnessActivationRequest {
+                    capsule: successor,
+                    activation_certificate: certificate,
+                }),
+            )
+            .await
+            .is_err()
+        );
+
+        let mut successor = capsule(config_ref(2, 3), genesis.capsule_hash);
+        successor.signer_set_commitment = signer_root;
+        successor.owner_cancel_public_key = genesis.owner_cancel_public_key;
+        successor.capsule_hash = sha256(&gp_wire::config_capsule_body_v3(&successor).unwrap());
+        let certificate = activation(
+            &genesis,
+            &successor,
+            &signer_seeds[..2],
+            &signer_proofs[..2],
+            [15; 32],
+        );
+        let ack = witness_activate(
+            State(state.clone()),
+            AxumPath(hex::encode(genesis.config_ref.config_id)),
+            Json(WitnessActivationRequest {
+                capsule: successor.clone(),
+                activation_certificate: certificate,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+
+        let activation_certificate_hash = ack.activation_certificate_hash;
+        let mut acks = vec![ack.clone()];
+        for (offset, seed) in witness_seeds[1..3].iter().enumerate() {
+            let key = signing_key(*seed);
+            let mut other = ack.clone();
+            other.witness_id = u16::try_from(offset + 2).unwrap();
+            other.witness_public_key = verifying_key_bytes(&key);
+            other.witness_signature = sign(&key, &gp_wire::witness_activation_ack(&other).unwrap());
+            acks.push(other);
+        }
+        let qc = EpochActivationQc {
+            protocol_version: PROTOCOL_VERSION_V3,
+            config_id: genesis.config_ref.config_id,
+            rotation_id: ack.context.rotation_id,
+            predecessor_epoch: 1,
+            predecessor_capsule_hash: genesis.capsule_hash,
+            successor_epoch: 2,
+            successor_capsule_hash: successor.capsule_hash,
+            activation_certificate_hash,
+            witness_fault_bound: 1,
+            witness_acks: acks,
+        };
+        let _ = witness_finalize(
+            State(state.clone()),
+            AxumPath(hex::encode(genesis.config_ref.config_id)),
+            Json(WitnessFinalizeRequest { activation_qc: qc }),
+        )
+        .await
+        .unwrap();
+
+        let now = wall_now().unwrap();
+        let challenge = EpochReadChallenge {
+            protocol_version: PROTOCOL_VERSION_V3,
+            config_id: genesis.config_ref.config_id,
+            client_nonce: [30; 32],
+            response_recipient_key: vec![31; 32],
+            issued_at: now,
+            expiry: now + 100,
+        };
+        let read = witness_read(
+            State(state.clone()),
+            AxumPath(hex::encode(genesis.config_ref.config_id)),
+            Json(challenge.clone()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(read.response.highest_guardian_epoch, 2);
+        assert_eq!(read.capsule.capsule_hash, successor.capsule_hash);
+        assert!(
+            witness_read(
+                State(state.clone()),
+                AxumPath(hex::encode(genesis.config_ref.config_id)),
+                Json(challenge),
+            )
+            .await
+            .is_err()
+        );
+
+        let rebooted: WitnessDisk = load_json(&path).unwrap();
+        let entry = &rebooted.entries[&hex::encode(genesis.config_ref.config_id)];
+        assert_eq!(entry.register.highest_guardian_epoch, 2);
+        assert_eq!(entry.register.highest_capsule_hash, successor.capsule_hash);
+        fs::remove_dir_all(temp).unwrap();
+    }
 }

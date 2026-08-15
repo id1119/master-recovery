@@ -6,8 +6,8 @@ license.workspace = true
 
 [dependencies]
 gp-types = { path = "../gp-types" }
+serde.workspace = true
 thiserror.workspace = true
 
 [lints]
 workspace = true
-
