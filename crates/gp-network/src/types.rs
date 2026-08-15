@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use gp_storage::SignerState;
 use gp_types::{
@@ -392,12 +395,22 @@ pub struct GuardianRotationProvisionV3 {
     pub epoch_store: gp_storage::GuardianEpochStore,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct StagedGuardianMaterialV3 {
-    pub encrypted_dek_share: gp_types::AeadCiphertext,
-    pub encrypted_ciphertext_fragment: gp_types::AeadCiphertext,
+    pub record_draft: Box<gp_types::GuardianRecordV3>,
     pub leaf: gp_types::PreparedRecordLeaf,
     pub dpss_result_commitment: Id32,
+}
+
+impl fmt::Debug for StagedGuardianMaterialV3 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StagedGuardianMaterialV3")
+            .field("record_draft", &"[LOCAL ENCRYPTED RECORD]")
+            .field("leaf", &self.leaf)
+            .field("dpss_result_commitment", &self.dpss_result_commitment)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -524,12 +537,14 @@ pub enum GuardianRotationRequestV3 {
         wrap_grant: gp_types::NewShareWrapGrant,
         fragment_index: u16,
         ciphertext_fragment: Vec<u8>,
+        ciphertext_fragment_proof: Vec<u8>,
         policy: gp_types::GuardianPolicyV3,
         opaque_slot_id: Id32,
     },
     PrepareCommit {
         plan: gp_types::RotationPlan,
-        record: gp_types::GuardianRecordV3,
+        guardian_material_root: Id32,
+        merkle_path_proof: Vec<u8>,
         dpss_result_commitment: Id32,
     },
     HandoffComplete {
@@ -594,7 +609,6 @@ pub enum GuardianRotationResponseV3 {
     },
     RefreshMaterialStaged {
         leaf: gp_types::PreparedRecordLeaf,
-        record_draft: Box<gp_types::GuardianRecordV3>,
         public_package: Vec<u8>,
         dpss_result_commitment: Id32,
     },

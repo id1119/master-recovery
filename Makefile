@@ -1,11 +1,11 @@
 .PHONY: test lint demo gui network-up network-setup network-recover network-cancel network-demo network-v3-smoke network-dashboard network-down
 
 test:
-	cargo test --workspace
+	cargo test --workspace --all-features
 
 lint:
 	cargo fmt --all -- --check
-	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 demo:
 	cargo run -p gp-cli -- demo --seed 424242 --mode strong

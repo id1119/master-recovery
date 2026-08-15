@@ -2036,6 +2036,7 @@ mod rotation_tests {
             owner_cancel_public_key: [4; 32],
             dpss_suite: DpssSuiteId::default(),
             dpss_public_commitment: [5; 32],
+            ciphertext_fragment_root: [9; 32],
             guardian_material_root: [6; 32],
             encrypted_recovery_descriptor: AeadCiphertext {
                 nonce: [7; 24],

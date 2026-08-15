@@ -1,5 +1,8 @@
 # Dealer-Free / Distributed Key Generation and Modern Applications of Shamir Secret Sharing
 
+> Historical research only (2026-08-15). No construction in this document is
+> implemented by Master Recovery; see `../../SHAMIR_AUDIT.md`.
+
 *A research survey of improvements built on Shamir's secret sharing (SSS), with protocol-level detail sufficient for implementation. Research only — no code in this document.*
 
 **Baseline.** Shamir's (t, n)-threshold scheme (Shamir, *How to Share a Secret*, CACM 22(11):612–613, 1979, https://doi.org/10.1145/359168.359176): a dealer samples a polynomial f(x) = s + a₁x + ⋯ + a_t xᵗ over a finite field 𝔽_q (degree t = threshold − 1, constant term = secret s) and gives party P_i the point (i, f(i)). Any t+1 shares interpolate f and recover s = f(0); fewer than t shares give Shannon-zero information about s. Everything below removes the trusted dealer, adds verification, refreshes shares, or moves computation into the exponent.

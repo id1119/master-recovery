@@ -386,6 +386,82 @@ pub fn rotate_ciphertext_fragments(
     erasure_encode(&ciphertext, new_data_shards, new_total_shards)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CiphertextFragmentCommitment {
+    pub root: Id32,
+    pub proofs: Vec<Vec<u8>>,
+}
+
+fn ciphertext_fragment_leaf(
+    config_id: &Id32,
+    payload_generation: u64,
+    fragment_index: u16,
+    fragment: &[u8],
+) -> Result<Id32, CryptoError> {
+    if fragment_index == 0 || fragment.is_empty() {
+        return Err(CryptoError::InvalidFragments);
+    }
+    let fragment_len = u64::try_from(fragment.len()).map_err(|_| CryptoError::InvalidFragments)?;
+    let mut value = Vec::with_capacity(32 + 32 + 8 + 2 + 8 + 32);
+    value.extend_from_slice(b"gp/ciphertext-fragment-leaf/v3");
+    value.extend_from_slice(config_id);
+    value.extend_from_slice(&payload_generation.to_be_bytes());
+    value.extend_from_slice(&fragment_index.to_be_bytes());
+    value.extend_from_slice(&fragment_len.to_be_bytes());
+    value.extend_from_slice(&sha256(fragment));
+    Ok(sha256(&value))
+}
+
+/// Commits to the complete deterministic Reed-Solomon fragment set for one
+/// immutable payload generation. The root is retained across guardian epochs,
+/// allowing every successor to reject a coordinator-supplied fragment that is
+/// corrupt, duplicated at another index, or derived from another payload.
+pub fn commit_ciphertext_fragments(
+    config_id: &Id32,
+    payload_generation: u64,
+    fragments: &[Vec<u8>],
+) -> Result<CiphertextFragmentCommitment, CryptoError> {
+    if fragments.is_empty() || fragments.len() > usize::from(u16::MAX) {
+        return Err(CryptoError::InvalidFragments);
+    }
+    let leaves = fragments
+        .iter()
+        .enumerate()
+        .map(|(offset, fragment)| {
+            ciphertext_fragment_leaf(
+                config_id,
+                payload_generation,
+                u16::try_from(offset + 1).map_err(|_| CryptoError::InvalidFragments)?,
+                fragment,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (root, proofs) = merkle_commit(&leaves)?;
+    Ok(CiphertextFragmentCommitment { root, proofs })
+}
+
+pub fn verify_ciphertext_fragment(
+    root: Id32,
+    config_id: &Id32,
+    payload_generation: u64,
+    fragment_index: u16,
+    total_fragments: u16,
+    fragment: &[u8],
+    proof: &[u8],
+) -> Result<(), CryptoError> {
+    let position = usize::from(fragment_index)
+        .checked_sub(1)
+        .filter(|position| *position < usize::from(total_fragments))
+        .ok_or(CryptoError::InvalidFragments)?;
+    merkle_verify(
+        root,
+        ciphertext_fragment_leaf(config_id, payload_generation, fragment_index, fragment)?,
+        position,
+        usize::from(total_fragments),
+        proof,
+    )
+}
+
 pub const CUSTODY_BLOCK_SIZE: usize = 4096;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -874,6 +950,63 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reconstructed, ciphertext);
+    }
+
+    #[test]
+    fn ciphertext_fragment_commitment_rejects_corruption_and_index_substitution() {
+        let config_id = [0x44; 32];
+        let ciphertext = (0..173_u8).collect::<Vec<_>>();
+        let fragments = erasure_encode(&ciphertext, 3, 5).unwrap();
+        let commitment = commit_ciphertext_fragments(&config_id, 7, &fragments).unwrap();
+        verify_ciphertext_fragment(
+            commitment.root,
+            &config_id,
+            7,
+            3,
+            5,
+            &fragments[2],
+            &commitment.proofs[2],
+        )
+        .unwrap();
+
+        let mut corrupted = fragments[2].clone();
+        corrupted[0] ^= 1;
+        assert!(
+            verify_ciphertext_fragment(
+                commitment.root,
+                &config_id,
+                7,
+                3,
+                5,
+                &corrupted,
+                &commitment.proofs[2],
+            )
+            .is_err()
+        );
+        assert!(
+            verify_ciphertext_fragment(
+                commitment.root,
+                &config_id,
+                7,
+                4,
+                5,
+                &fragments[2],
+                &commitment.proofs[2],
+            )
+            .is_err()
+        );
+        assert!(
+            verify_ciphertext_fragment(
+                commitment.root,
+                &config_id,
+                8,
+                3,
+                5,
+                &fragments[2],
+                &commitment.proofs[2],
+            )
+            .is_err()
+        );
     }
 
     #[test]

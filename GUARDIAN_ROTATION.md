@@ -2,7 +2,7 @@
 
 Status: authoritative protocol-v3 Guardian Rotation specification.
 
-Date: 2026-08-14
+Date: 2026-08-15
 
 This document follows the requested eight-phase analysis. On 2026-08-14 the
 owner explicitly authorized this document as the protocol-v3 Guardian Rotation
@@ -79,7 +79,9 @@ this design:
   sequence checked, and X-Wing sealed to the exact peer; coordinator-visible
   objects contain ciphertext fragments but no DEK share or payload plaintext;
 - every successor record is staged, Merkle-committed, and durably PREPARED
-  before signer Activate votes and the witness QC;
+  before signer Activate votes and the witness QC. The record and its encrypted
+  DEK share remain local to that guardian: the coordinator receives only the
+  prepared-record leaf and returns the resulting Merkle root/path;
 - abort requires a signer threshold rather than one signer's signature;
 - `cancel-rotation-v3` first persists a `2f+1` witness veto against the exact
   rotation, then persists owner-authorized tombstones at enough old guardians
@@ -89,6 +91,9 @@ this design:
 - old fragment contributions carry their complete committed record leaf, so
   the coordinator verifies the predecessor material-root proof before using a
   ciphertext fragment;
+- the setup capsule also commits to the deterministic raw Reed-Solomon
+  fragment set. Every successor verifies its exact fragment and index against
+  that stable payload-generation root before signing a preparation receipt;
 - activation derives its draining-request set locally at each guardian. New
   old-epoch Begin requests are rejected while exact pre-activation requests
   remain drainable;
@@ -638,6 +643,9 @@ For routine guardian rotation:
 
 - payload generation, C, DEK and A remain unchanged;
 - guardian epoch increments exactly by one;
+- the implemented one-for-one replacement profile retains guardian count and
+  threshold; changing erasure parameters requires a separately specified full
+  configuration rotation;
 - every DEK share is independently refreshed;
 - all opaque guardian slots, session keys, wrapping contexts, material roots
   and routes are fresh;
@@ -670,6 +678,9 @@ role, and send their committed ciphertext fragment to the coordinator.
 They run the new-committee DPSS role, receive exactly one new share and one
 fragment, wrap the share under their epoch-specific A-derived key, durably
 store the record, delete plaintext DPSS state, and sign a preparation receipt.
+They never return the wrapped share or full record to the coordinator, because
+that coordinator knows A and therefore the wrapping key; they return only the
+record commitment leaf needed to assemble the material root.
 
 ### Signers
 
@@ -852,8 +863,11 @@ coordinator.
 ### Step 5 — Repair encrypted payload fragments
 
 At least k old guardians send their committed F_i to the coordinator under the
-release certificate. The coordinator verifies Merkle proofs, reconstructs C,
-and encodes fresh F'_j values for the new n/k policy. It never decrypts C.
+release certificate. The coordinator verifies their record Merkle proofs,
+reconstructs C, and deterministically re-encodes F'_j with the unchanged n/k
+parameters. It must reproduce the payload generation's stable ciphertext-
+fragment Merkle root. Each successor verifies its exact fragment/index proof
+against that root before preparation. The coordinator never decrypts C.
 
 If fewer than k valid fragments exist, automatic rotation aborts. There is no
 way to regenerate C from less than k under the current erasure code.
@@ -878,8 +892,11 @@ Each new guardian:
 3. obtains and verifies one new D'_j;
 4. encrypts it under new K_j with full ConfigRef/index associated data;
 5. stores E'_j, F'_j, policy, integrity proofs and fresh opaque routes;
-6. erases D'_j, K_j and DPSS ephemeral state;
-7. signs `NewGuardianPreparedAck` only after an atomic durable write.
+6. discloses only the prepared-record commitment leaf, then locally attaches
+   the coordinator-computed Merkle root/path after verifying it;
+7. erases D'_j, K_j and DPSS ephemeral state;
+8. signs `NewGuardianPreparedAck`, including the exact material root, only
+   after an atomic durable write.
 
 The selected DPSS construction must guarantee either one consistent successor
 sharing of the same DEK or abort. Master Recovery does not define its own
@@ -1448,7 +1465,8 @@ Never display “proof of storage” for a Merkle commitment or sampled audit.
 
 1. planned 5-of-8 -> 5-of-8 replacement without plaintext reconstruction;
 2. one missing old guardian and one malicious subshare dealer;
-3. change n/k under a DPSS-supported parameter set;
+3. reject a routine rotation that attempts to change n/k; parameter changes
+   are reserved for a separately specified full configuration rotation;
 4. reconstruct C from k fragments and provision all new fragments;
 5. all new Prepared acks -> activation QC -> old drain -> retire;
 6. new guardian crash before durable ack -> old remains ACTIVE;
@@ -1744,9 +1762,10 @@ primitives is not a maintained production DPSS implementation.
 
 ## Final non-claims
 
-This proposal does not claim:
+This implemented prototype does not claim:
 
-- implementation or audit of DPSS in this repository;
+- an external audit of this repository's exact FROST RTS + refresh-DKG
+  integration;
 - provable physical deletion;
 - autonomous rotation with only the ordinary 5-of-8 recovery quorum in every
   fault model;

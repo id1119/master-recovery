@@ -10,7 +10,8 @@
   material and oversized inputs. No Rust serialization is signed.
 - `gp-crypto::rotation` is a thin adapter over maintained ZF FROST
   Ristretto255 RTS and refresh-DKG. It also supplies full-epoch HKDF/AEAD
-  separation, ciphertext-only fragment repair and sampled Merkle custody
+  separation and ciphertext-only fragment repair. `gp-crypto` additionally
+  supplies the stable raw-fragment Merkle commitment and sampled custody
   checks. No field or polynomial arithmetic is local.
 - `gp-core::rotation` contains the deterministic RotationMachine,
   EpochWitnessMachine and epoch-bound recovery/draining machine.
@@ -27,7 +28,9 @@
   vetoes, and nonce-bound reads. Provider messages are signed and X-Wing
   sealed directly for their destination; the coordinator only relays opaque
   provider payloads. A mode-0600 rotation-control artifact lets a separate
-  owner process cancel during Delay.
+  owner process cancel during Delay. Successor records remain guardian-local
+  during PREPARE; the coordinator sees
+  only their commitment leaves and returns Merkle root/path material.
 
 ## Workspace
 

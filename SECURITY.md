@@ -26,6 +26,22 @@ best-effort activation notice only to enter draining. Each old ciphertext
 fragment contribution proves its full committed record leaf against the
 predecessor material root before reconstruction.
 
+The public capsule also binds a stable, domain-separated Merkle root over the
+raw deterministic Reed-Solomon fragment set for the immutable payload
+generation. After reconstruction, the coordinator must reproduce that root;
+each successor verifies its exact fragment, index, shard count and proof before
+durable preparation. This prevents a coordinator from activating a successor
+set whose locally committed records contain corrupted or permuted fragments.
+
+Although the rotation coordinator reconstructs A and can derive each new
+guardian's wrapping key, it never receives the corresponding wrapped DEK share
+or full guardian record. Successors retain those locally and expose only a
+commitment leaf; otherwise ciphertext plus the coordinator-known wrapping key
+would be equivalent to disclosing each share and would let the coordinator
+reconstruct DEK. Each preparation acknowledgement signs the exact assembled
+material root, and signer activation rejects any Ready certificate whose root
+differs from an acknowledgement or the successor capsule.
+
 Atomicity is old-ACTIVE/new-PREPARED until a 2f+1 witness activation QC exists.
 Every advertised successor record is required. Witness predecessor locks and
 fresh-nonce quorum reads reject forks and rollback under the stated f bound;

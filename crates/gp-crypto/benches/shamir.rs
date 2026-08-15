@@ -1,8 +1,11 @@
-use std::{hint::black_box, time::Duration};
+use std::{collections::BTreeMap, hint::black_box, time::Duration};
 
 use blahaj::{Share, Sharks};
 use criterion::{Criterion, criterion_group, criterion_main};
-use gp_crypto::{CryptoError, SecretVec, recover_secret, split_secret};
+use gp_crypto::{
+    CryptoError, SecretVec, frost_dealer_split, frost_recover_dek, frost_refresh_part1,
+    frost_refresh_part2, frost_refresh_part3, recover_secret, split_secret,
+};
 use rand_chacha08::{ChaCha20Rng, rand_core::SeedableRng};
 use zeroize::Zeroizing;
 
@@ -75,6 +78,78 @@ fn bench_configuration(c: &mut Criterion, label: &str, threshold: u16, total: u1
 fn bench_shamir(c: &mut Criterion) {
     bench_configuration(c, "2-of-3/32-byte", 2, 3, 0x11);
     bench_configuration(c, "5-of-8/32-byte", 5, 8, 0x22);
+
+    let dealer = frost_dealer_split(5, 8, [0x31; 32]).unwrap();
+    c.bench_function("frost/dealer-split/5-of-8", |b| {
+        b.iter(|| frost_dealer_split(5, 8, black_box([0x32; 32])).unwrap())
+    });
+    c.bench_function("frost/recover/5-of-8", |b| {
+        b.iter(|| frost_recover_dek(black_box(&dealer.shares[..5]), 5).unwrap())
+    });
+    c.bench_function("frost/full-roster-refresh/5-of-8", |b| {
+        b.iter(|| run_full_roster_refresh(black_box(&dealer)).unwrap())
+    });
+}
+
+fn run_full_roster_refresh(
+    dealer: &gp_crypto::FrostDealerOutput,
+) -> Result<Vec<SecretVec>, CryptoError> {
+    let participants = (1..=8_u16).collect::<Vec<_>>();
+    let round1 = participants
+        .iter()
+        .map(|participant| {
+            Ok((
+                *participant,
+                frost_refresh_part1(*participant, 5, 8, [*participant as u8; 32])?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, CryptoError>>()?;
+    let round2 = participants
+        .iter()
+        .map(|participant| {
+            let incoming = round1
+                .iter()
+                .filter(|(sender, _)| sender != &participant)
+                .map(|(sender, package)| (*sender, package.broadcast.clone()))
+                .collect::<Vec<_>>();
+            Ok((
+                *participant,
+                frost_refresh_part2(&round1[participant].secret_state, &incoming)?,
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>, CryptoError>>()?;
+    participants
+        .iter()
+        .map(|participant| {
+            let incoming1 = round1
+                .iter()
+                .filter(|(sender, _)| *sender != participant)
+                .map(|(sender, package)| (*sender, package.broadcast.clone()))
+                .collect::<Vec<_>>();
+            let incoming2 = round2
+                .iter()
+                .filter(|(sender, _)| *sender != participant)
+                .map(|(sender, package)| {
+                    let message = package
+                        .direct_messages
+                        .iter()
+                        .find(|(recipient, _)| recipient == participant)
+                        .expect("complete refresh package")
+                        .1
+                        .clone();
+                    (*sender, message)
+                })
+                .collect::<Vec<_>>();
+            frost_refresh_part3(
+                &round2[participant].secret_state,
+                &incoming1,
+                &incoming2,
+                &dealer.public_package,
+                &dealer.shares[usize::from(*participant - 1)],
+            )
+            .map(|output| output.share)
+        })
+        .collect()
 }
 
 criterion_group! {

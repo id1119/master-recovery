@@ -203,6 +203,7 @@ fn prepared_ack_into(
     context_into(out, &ack.context)?;
     out.bytes(&ack.plan_hash)?;
     out.bytes(&ack.dpss_result_commitment)?;
+    out.bytes(&ack.guardian_material_root)?;
     out.u16(ack.new_guardian_index);
     prepared_leaf_into(out, &ack.prepared_record_leaf)?;
     out.u64(ack.durable_write_generation);
@@ -578,6 +579,7 @@ pub fn rotation_ready_certificate(value: &RotationReadyCertificate) -> Result<Ve
         !same_rotation(&value.context, &ack.context)
             || ack.plan_hash != value.plan_hash
             || ack.dpss_result_commitment != value.dpss_result_commitment
+            || ack.guardian_material_root != value.guardian_material_root
             || ack.new_guardian_index != ack.prepared_record_leaf.guardian_index
             || ack.durable_write_generation == 0
     }) || value.old_handoff_acks.iter().any(|ack| {
@@ -1042,6 +1044,7 @@ pub fn config_capsule_body_v3(value: &ConfigCapsuleV3) -> Result<Vec<u8>, WireEr
     out.bytes(&value.owner_cancel_public_key)?;
     out.u16(dpss_suite_id(value.dpss_suite));
     out.bytes(&value.dpss_public_commitment)?;
+    out.bytes(&value.ciphertext_fragment_root)?;
     out.bytes(&value.guardian_material_root)?;
     out.bytes(&value.encrypted_recovery_descriptor.nonce)?;
     out.bytes(&value.encrypted_recovery_descriptor.ciphertext)?;
@@ -1392,6 +1395,7 @@ mod tests {
             owner_cancel_public_key: [11; 32],
             dpss_suite: DpssSuiteId::default(),
             dpss_public_commitment: [12; 32],
+            ciphertext_fragment_root: [16; 32],
             guardian_material_root: [13; 32],
             encrypted_recovery_descriptor: AeadCiphertext {
                 nonce: [14; 24],
@@ -1423,6 +1427,9 @@ mod tests {
         mutations.push(changed);
         let mut changed = capsule.clone();
         changed.dpss_public_commitment[0] ^= 1;
+        mutations.push(changed);
+        let mut changed = capsule.clone();
+        changed.ciphertext_fragment_root[0] ^= 1;
         mutations.push(changed);
         let mut changed = capsule.clone();
         changed.guardian_material_root[0] ^= 1;

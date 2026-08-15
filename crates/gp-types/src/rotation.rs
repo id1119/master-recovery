@@ -310,6 +310,7 @@ pub struct NewGuardianPreparedAck {
     pub context: RotationContext,
     pub plan_hash: Id32,
     pub dpss_result_commitment: Id32,
+    pub guardian_material_root: Id32,
     pub new_guardian_index: u16,
     pub prepared_record_leaf: PreparedRecordLeaf,
     pub durable_write_generation: u64,
@@ -575,6 +576,9 @@ pub struct ConfigCapsuleV3 {
     pub owner_cancel_public_key: [u8; 32],
     pub dpss_suite: DpssSuiteId,
     pub dpss_public_commitment: Id32,
+    /// Stable commitment to the complete raw ciphertext-fragment set for this
+    /// payload generation. Routine guardian rotation retains it.
+    pub ciphertext_fragment_root: Id32,
     pub guardian_material_root: Id32,
     pub encrypted_recovery_descriptor: AeadCiphertext,
     pub activation_certificate: Option<RotationActivateCertificate>,
@@ -715,6 +719,7 @@ mod tests {
             owner_cancel_public_key: [4; 32],
             dpss_suite: DpssSuiteId::default(),
             dpss_public_commitment: [5; 32],
+            ciphertext_fragment_root: [10; 32],
             guardian_material_root: [6; 32],
             encrypted_recovery_descriptor: AeadCiphertext {
                 nonce: [7; 24],

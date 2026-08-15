@@ -1,5 +1,8 @@
 # Efficiency and Practicality Improvements over Basic Shamir Secret Sharing
 
+> Historical research only (2026-08-15). The custom Python implementation was
+> removed; final implementation and benchmark status is in `../../SHAMIR_AUDIT.md`.
+
 Research survey covering eight families of improvements to the basic Shamir
 secret-sharing scheme (Shamir, "How to share a secret", CACM 22(11), 1979):
 hybrid/knowledge-based sharing, field and arithmetic choices, Reed-Solomon

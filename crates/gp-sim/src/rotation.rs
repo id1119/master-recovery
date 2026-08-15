@@ -10,12 +10,13 @@ use gp_core::{
 };
 use gp_crypto::{
     EpochFrostShare, RecipientKeyPair, SecretVec, aead_decrypt, aead_encrypt, begin_old_share,
-    custody_commit, descriptor_key_v3, erasure_encode, finalize_new_share, frost_dealer_split,
-    frost_public_add_repaired_share, frost_public_package_digest, frost_recover_dek_for_epoch,
-    frost_refresh_part1, frost_refresh_part2, frost_refresh_part3, frost_repair_part2,
-    frost_verify_share, guardian_fragment_key_v3, guardian_share_key_v3, hash_aead, merkle_commit,
-    recover_secret, rotate_ciphertext_fragments, seal_to_recipient, sha256, sign, signing_key,
-    split_secret, verify, verify_dpss_result, verifying_key_bytes,
+    commit_ciphertext_fragments, custody_commit, descriptor_key_v3, erasure_encode,
+    finalize_new_share, frost_dealer_split, frost_public_add_repaired_share,
+    frost_public_package_digest, frost_recover_dek_for_epoch, frost_refresh_part1,
+    frost_refresh_part2, frost_refresh_part3, frost_repair_part2, frost_verify_share,
+    guardian_fragment_key_v3, guardian_share_key_v3, hash_aead, merkle_commit, recover_secret,
+    rotate_ciphertext_fragments, seal_to_recipient, sha256, sign, signing_key, split_secret,
+    verify, verify_dpss_result, verifying_key_bytes,
 };
 use gp_storage::{DpssSessionJournal, GuardianEpochStore};
 use gp_types::{
@@ -167,6 +168,7 @@ struct CapsuleBuildInput<'a> {
     config_ref: ConfigRef,
     predecessor_capsule_hash: Id32,
     routes: &'a [GuardianRouteV3],
+    ciphertext_fragment_root: Id32,
     guardian_material_root: Id32,
     ciphertext_len: usize,
     payload_nonce: [u8; 24],
@@ -353,6 +355,7 @@ fn build_capsule(
         config_ref,
         predecessor_capsule_hash,
         routes,
+        ciphertext_fragment_root,
         guardian_material_root,
         ciphertext_len,
         payload_nonce,
@@ -393,6 +396,7 @@ fn build_capsule(
         owner_cancel_public_key: [22; 32],
         dpss_suite: DpssSuiteId::default(),
         dpss_public_commitment: frost_public_package_digest(public_package)?,
+        ciphertext_fragment_root,
         guardian_material_root,
         encrypted_recovery_descriptor,
         activation_certificate: None,
@@ -448,6 +452,12 @@ fn setup_world(options: &RotationDemoOptions) -> Result<RotationWorld, SimError>
         GUARDIAN_THRESHOLD,
         GUARDIAN_COUNT,
     )?;
+    let ciphertext_fragment_root = commit_ciphertext_fragments(
+        &config_ref.config_id,
+        config_ref.payload_generation,
+        &fragments,
+    )?
+    .root;
     let active_ids = (1..=GUARDIAN_COUNT).collect::<Vec<_>>();
     let routes = make_routes(&active_ids, 1, &mut rng);
     let shares = active_ids
@@ -478,6 +488,7 @@ fn setup_world(options: &RotationDemoOptions) -> Result<RotationWorld, SimError>
             config_ref,
             predecessor_capsule_hash: [0; 32],
             routes: &routes,
+            ciphertext_fragment_root,
             guardian_material_root: material_root,
             ciphertext_len,
             payload_nonce: payload_ciphertext.nonce,
@@ -946,6 +957,15 @@ fn rotate_once(
         GUARDIAN_THRESHOLD,
         GUARDIAN_COUNT,
     )?;
+    let repaired_fragment_root = commit_ciphertext_fragments(
+        &successor_ref.config_id,
+        successor_ref.payload_generation,
+        &repaired_fragments,
+    )?
+    .root;
+    if repaired_fragment_root != world.current_capsule.ciphertext_fragment_root {
+        return Err(SimError::RecoveryMismatch);
+    }
     let malicious = options.fail_preparation_at == Some(ordinal);
     let dpss =
         dpss_replace_and_refresh(world, old_shares, removed, added, &successor_ids, malicious);
@@ -992,6 +1012,7 @@ fn rotate_once(
             config_ref: successor_ref,
             predecessor_capsule_hash: world.current_capsule_hash,
             routes: &successor_routes,
+            ciphertext_fragment_root: repaired_fragment_root,
             guardian_material_root: material_root,
             ciphertext_len: world.ciphertext_len,
             payload_nonce: world.payload_ciphertext.nonce,
@@ -1032,6 +1053,7 @@ fn rotate_once(
             context: rotation_context.clone(),
             plan_hash,
             dpss_result_commitment,
+            guardian_material_root: material_root,
             new_guardian_index: *id,
             prepared_record_leaf: prepared_leaves[id].clone(),
             durable_write_generation: generation,

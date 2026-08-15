@@ -14,9 +14,10 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use gp_crypto::{
-    RecipientKeyPair, aead_decrypt, aead_encrypt, descriptor_key_v3, erasure_reconstruct,
-    guardian_fragment_key_v3, guardian_share_key_v3, merkle_commit, merkle_verify, recover_secret,
-    seal_to_recipient, sha256, sign, signing_key, verify, verifying_key_bytes,
+    RecipientKeyPair, aead_decrypt, aead_encrypt, commit_ciphertext_fragments, descriptor_key_v3,
+    erasure_reconstruct, guardian_fragment_key_v3, guardian_share_key_v3, merkle_commit,
+    merkle_verify, recover_secret, seal_to_recipient, sha256, sign, signing_key, verify,
+    verifying_key_bytes,
 };
 use gp_types::{
     AbortRotationCertificate, AeadCiphertext, BeginRotationCertificate, ConfigCapsuleV3, ConfigRef,
@@ -598,7 +599,14 @@ pub async fn rotate_v3(options: RotateV3Options) -> Result<RotateV3Result> {
     )?;
     let successor_fragments =
         gp_crypto::erasure_encode(&ciphertext, plan.new_guardian_threshold, plan.total_shards)?;
-    let mut drafts = BTreeMap::new();
+    let fragment_commitment = commit_ciphertext_fragments(
+        &successor_ref.config_id,
+        successor_ref.payload_generation,
+        &successor_fragments,
+    )?;
+    if fragment_commitment.root != predecessor.ciphertext_fragment_root {
+        bail!("reconstructed ciphertext does not match the predecessor fragment commitment");
+    }
     let mut leaves = Vec::new();
     for (offset, route) in new_roster.iter().enumerate() {
         let grant = new_grant(
@@ -631,6 +639,7 @@ pub async fn rotate_v3(options: RotateV3Options) -> Result<RotateV3Result> {
                 wrap_grant: grant,
                 fragment_index: u16::try_from(offset + 1)?,
                 ciphertext_fragment: successor_fragments[offset].clone(),
+                ciphertext_fragment_proof: fragment_commitment.proofs[offset].clone(),
                 policy,
                 opaque_slot_id: route.opaque_slot_id,
             },
@@ -639,7 +648,6 @@ pub async fn rotate_v3(options: RotateV3Options) -> Result<RotateV3Result> {
         .await?;
         let GuardianRotationResponseV3::RefreshMaterialStaged {
             leaf,
-            record_draft,
             public_package: candidate_public,
             dpss_result_commitment: candidate_commitment,
         } = response
@@ -650,7 +658,6 @@ pub async fn rotate_v3(options: RotateV3Options) -> Result<RotateV3Result> {
             bail!("staged guardian material changed the agreed refresh result");
         }
         leaves.push(leaf);
-        drafts.insert(route.guardian_index, *record_draft);
     }
     let leaf_hashes = leaves
         .iter()
@@ -659,18 +666,14 @@ pub async fn rotate_v3(options: RotateV3Options) -> Result<RotateV3Result> {
     let (material_root, proofs) = merkle_commit(&leaf_hashes)?;
     let mut prepared_acks = Vec::new();
     for (offset, route) in new_roster.iter().enumerate() {
-        let mut record = drafts
-            .remove(&route.guardian_index)
-            .context("missing staged record")?;
-        record.policy.guardian_material_root = material_root;
-        record.merkle_path_proof = proofs[offset].clone();
         let response = send_rotation_mailbox::<_, GuardianRotationResponseV3>(
             &client,
             &route.mailbox,
             &card.relay_bases,
             &GuardianRotationRequestV3::PrepareCommit {
                 plan: plan.clone(),
-                record,
+                guardian_material_root: material_root,
+                merkle_path_proof: proofs[offset].clone(),
                 dpss_result_commitment,
             },
             &coordinator,
@@ -744,6 +747,7 @@ pub async fn rotate_v3(options: RotateV3Options) -> Result<RotateV3Result> {
         owner_cancel_public_key: predecessor.owner_cancel_public_key,
         dpss_suite: predecessor.dpss_suite,
         dpss_public_commitment: dpss_result_commitment,
+        ciphertext_fragment_root: predecessor.ciphertext_fragment_root,
         guardian_material_root: material_root,
         encrypted_recovery_descriptor: encrypted_descriptor,
         activation_certificate: None,

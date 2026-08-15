@@ -20,8 +20,14 @@ authoritative Guardian Rotation design from `GUARDIAN_ROTATION.md`:
 - at least k committed old fragments reconstruct ciphertext C, which is
   Reed–Solomon re-encoded and stored in fresh epoch AEAD envelopes; every
   contributing fragment carries its complete committed record leaf and a
-  proof against the predecessor material root;
+  proof against the predecessor material root. The setup capsule separately
+  commits to the deterministic raw fragment set, and every successor verifies
+  its exact fragment/index proof against that stable payload-generation root
+  before preparation;
 - all n successor records must be durably PREPARED before signer Activate;
+  full records and wrapped DEK shares remain guardian-local because the
+  A-holding coordinator knows their wrapping keys; the coordinator receives
+  only commitment leaves and returns Merkle roots/paths;
 - 3f+1 card-pinned witnesses store at most one direct child per predecessor;
   2f+1 signed durable-write acknowledgements form the activation QC;
 - old records remain ACTIVE throughout preparation, then DRAIN only exact
@@ -358,7 +364,7 @@ The recovery client:
 9. outputs the secret locally,
 10. zeroizes temporary secret material.
 
-## 4. Rotation
+## 4. Protocol-v2 full rotation
 
 After successful recovery, create a new configuration version with fresh:
 

@@ -9,11 +9,11 @@ use std::{
 use anyhow::{Context, Result, bail};
 use gp_crypto::{
     EpochFrostShare, RecipientKeyPair, XWING_PUBLIC_KEY_LEN, aead_decrypt, aead_encrypt,
-    custody_commit, descriptor_key_v3, erasure_encode, erasure_reconstruct, frost_dealer_split,
-    frost_public_package_digest, frost_recover_dek_for_epoch, frost_verify_share,
-    guardian_fragment_key_v3, guardian_share_key_v3, hash_aead, merkle_commit, merkle_verify,
-    recover_secret, seal_to_recipient, sha256, signing_key, split_secret, verify,
-    verifying_key_bytes, zeroize_id,
+    commit_ciphertext_fragments, custody_commit, descriptor_key_v3, erasure_encode,
+    erasure_reconstruct, frost_dealer_split, frost_public_package_digest,
+    frost_recover_dek_for_epoch, frost_verify_share, guardian_fragment_key_v3,
+    guardian_share_key_v3, hash_aead, merkle_commit, merkle_verify, recover_secret,
+    seal_to_recipient, sha256, signing_key, split_secret, verify, verifying_key_bytes, zeroize_id,
 };
 use gp_types::{
     AeadCiphertext, BeginRecoveryCertificate, BeginRecoveryCertificateV3, ConfigCapsule,
@@ -232,6 +232,11 @@ pub async fn setup_v3(options: SetupV3Options) -> Result<RecoveryCardV3> {
         options.guardian_threshold,
         guardian_count,
     )?;
+    let ciphertext_fragment_commitment = commit_ciphertext_fragments(
+        &config_ref.config_id,
+        config_ref.payload_generation,
+        &fragments,
+    )?;
     let dpss_public_commitment = frost_public_package_digest(&frost.public_package)?;
     let mut records = Vec::with_capacity(usize::from(guardian_count));
     let mut prepared_leaves = Vec::with_capacity(usize::from(guardian_count));
@@ -335,6 +340,7 @@ pub async fn setup_v3(options: SetupV3Options) -> Result<RecoveryCardV3> {
         owner_cancel_public_key,
         dpss_suite: DpssSuiteId::default(),
         dpss_public_commitment,
+        ciphertext_fragment_root: ciphertext_fragment_commitment.root,
         guardian_material_root,
         encrypted_recovery_descriptor,
         activation_certificate: None,

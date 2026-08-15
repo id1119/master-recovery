@@ -1,5 +1,9 @@
 # Security claims — honest register
 
+> Historical research archive (2026-08-15): this document describes the
+> removed Python SSS experiment, not the Master Recovery implementation or an
+> audited construction. See `../SHAMIR_AUDIT.md` for the final disposition.
+
 This file states what the package provably provides, what it assumes, and what
 it explicitly does **not** claim. It is a security *argument*, not a formal
 proof and not an audit: no independent review has been performed. Every claim

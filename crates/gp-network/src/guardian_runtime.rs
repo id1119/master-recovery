@@ -14,6 +14,7 @@ use gp_crypto::{
     frost_refresh_part1, frost_refresh_part2, frost_refresh_part3, frost_repair_part2,
     frost_verify_share, hash_aead, merkle_verify, open_local_rotation_journal,
     seal_local_rotation_journal, seal_to_recipient, sha256, sign, signing_key, verify,
+    verify_ciphertext_fragment,
 };
 use gp_types::{
     DpssPhase, DpssProtocolMessage, GuardianEpochState, Id32, NewGuardianPreparedAck,
@@ -588,6 +589,7 @@ pub fn handle_guardian_rotation_v3(
             wrap_grant,
             fragment_index,
             ciphertext_fragment,
+            ciphertext_fragment_proof,
             policy,
             opaque_slot_id,
         } => stage_material(
@@ -597,14 +599,23 @@ pub fn handle_guardian_rotation_v3(
             wrap_grant,
             fragment_index,
             ciphertext_fragment,
+            ciphertext_fragment_proof,
             policy,
             opaque_slot_id,
         ),
         GuardianRotationRequestV3::PrepareCommit {
             plan,
-            record,
+            guardian_material_root,
+            merkle_path_proof,
             dpss_result_commitment,
-        } => prepare_commit(entry, identity_seed, plan, record, dpss_result_commitment),
+        } => prepare_commit(
+            entry,
+            identity_seed,
+            plan,
+            guardian_material_root,
+            merkle_path_proof,
+            dpss_result_commitment,
+        ),
         GuardianRotationRequestV3::HandoffComplete {
             plan,
             dpss_result_commitment,
@@ -1073,11 +1084,13 @@ fn stage_material(
     wrap_grant: gp_types::NewShareWrapGrant,
     fragment_index: u16,
     ciphertext_fragment: Vec<u8>,
+    ciphertext_fragment_proof: Vec<u8>,
     policy: gp_types::GuardianPolicyV3,
     opaque_slot_id: Id32,
 ) -> Result<GuardianRotationResponseV3> {
     let new_route = guardian_route(entry, &plan, true)?.clone();
     let predecessor_capsule_hash = entry.provision.predecessor_capsule.capsule_hash;
+    let ciphertext_fragment_root = entry.provision.predecessor_capsule.ciphertext_fragment_root;
     let signer_set_commitment = entry.provision.predecessor_capsule.signer_set_commitment;
     let session = session_mut(entry, &plan)?;
     let LocalDpssState::Refreshed {
@@ -1088,6 +1101,12 @@ fn stage_material(
         bail!("guardian has not finalized its refresh share");
     };
     let dpss_result_commitment = frost_public_package_digest(&public_package)?;
+    let fragment_position = plan
+        .new_roster
+        .iter()
+        .position(|candidate| candidate.guardian_index == new_route.guardian_index)
+        .context("successor route is absent")?;
+    let expected_fragment_index = u16::try_from(fragment_position + 1)?;
     if policy.config_ref != plan.successor
         || policy.epoch_state != GuardianEpochState::Prepared
         || policy.predecessor_capsule_hash != predecessor_capsule_hash
@@ -1095,9 +1114,20 @@ fn stage_material(
         || policy.dpss_public_commitment != dpss_result_commitment
         || policy.signer_set_commitment != signer_set_commitment
         || opaque_slot_id != new_route.opaque_slot_id
+        || fragment_index != expected_fragment_index
     {
         bail!("successor policy or opaque slot does not bind the exact DPSS result");
     }
+    verify_ciphertext_fragment(
+        ciphertext_fragment_root,
+        &plan.successor.config_id,
+        plan.successor.payload_generation,
+        fragment_index,
+        plan.total_shards,
+        &ciphertext_fragment,
+        &ciphertext_fragment_proof,
+    )
+    .context("successor ciphertext fragment is not committed by the predecessor payload")?;
     let (mut share_key, mut fragment_key) =
         open_new_keys(identity_seed, &plan, new_route.guardian_index, &wrap_grant)?;
     let encrypted_dek_share = aead_encrypt(
@@ -1142,14 +1172,12 @@ fn stage_material(
     };
     session.encrypted_local_state = None;
     session.staged_material = Some(StagedGuardianMaterialV3 {
-        encrypted_dek_share,
-        encrypted_ciphertext_fragment,
+        record_draft: Box::new(record_draft),
         leaf: leaf.clone(),
         dpss_result_commitment,
     });
     Ok(GuardianRotationResponseV3::RefreshMaterialStaged {
         leaf,
-        record_draft: Box::new(record_draft),
         public_package,
         dpss_result_commitment,
     })
@@ -1159,7 +1187,8 @@ fn prepare_commit(
     entry: &mut GuardianRotationEntryV3,
     identity_seed: &Id32,
     plan: RotationPlan,
-    record: gp_types::GuardianRecordV3,
+    guardian_material_root: Id32,
+    merkle_path_proof: Vec<u8>,
     dpss_result_commitment: Id32,
 ) -> Result<GuardianRotationResponseV3> {
     let route = guardian_route(entry, &plan, true)?.clone();
@@ -1180,25 +1209,28 @@ fn prepare_commit(
         .iter()
         .position(|candidate| candidate.guardian_index == route.guardian_index)
         .context("successor route is absent")?;
-    if staged.dpss_result_commitment != dpss_result_commitment
-        || record.guardian_index != route.guardian_index
-        || record.fragment_index != staged.leaf.fragment_index
-        || record.opaque_slot_id != route.opaque_slot_id
-        || record.encrypted_dek_share != staged.encrypted_dek_share
-        || record.encrypted_ciphertext_fragment != staged.encrypted_ciphertext_fragment
-        || record.policy.config_ref != plan.successor
-        || record.policy.guardian_material_root == [0; 32]
-        || record.policy.dpss_public_commitment != dpss_result_commitment
+    if staged.dpss_result_commitment != dpss_result_commitment || guardian_material_root == [0; 32]
     {
         bail!("durable successor record differs from locally staged material");
     }
     merkle_verify(
-        record.policy.guardian_material_root,
+        guardian_material_root,
         leaf_hash,
         position,
         plan.new_roster.len(),
-        &record.merkle_path_proof,
+        &merkle_path_proof,
     )?;
+    let mut record = *staged.record_draft;
+    if record.guardian_index != route.guardian_index
+        || record.fragment_index != staged.leaf.fragment_index
+        || record.opaque_slot_id != route.opaque_slot_id
+        || record.policy.config_ref != plan.successor
+        || record.policy.dpss_public_commitment != dpss_result_commitment
+    {
+        bail!("locally staged successor record is inconsistent");
+    }
+    record.policy.guardian_material_root = guardian_material_root;
+    record.merkle_path_proof = merkle_path_proof;
     let mut custody_bytes = record.encrypted_dek_share.nonce.to_vec();
     custody_bytes.extend_from_slice(&record.encrypted_dek_share.ciphertext);
     custody_bytes.extend_from_slice(&record.encrypted_ciphertext_fragment.nonce);
@@ -1231,6 +1263,7 @@ fn prepare_commit(
         context: plan.context.clone(),
         plan_hash: session_plan_hash,
         dpss_result_commitment,
+        guardian_material_root,
         new_guardian_index: route.guardian_index,
         prepared_record_leaf: staged.leaf.clone(),
         durable_write_generation: generation,
@@ -1289,9 +1322,30 @@ fn activate(
     if activated_capsule.config_ref != plan.successor
         || activated_capsule.predecessor_capsule_hash
             != entry.provision.predecessor_capsule.capsule_hash
+        || activated_capsule.ciphertext_fragment_root
+            != entry.provision.predecessor_capsule.ciphertext_fragment_root
+        || activated_capsule.guardian_count != u16::try_from(plan.new_roster.len())?
+        || activated_capsule.guardian_threshold != plan.new_guardian_threshold
+        || activated_capsule.dpss_suite != plan.dpss_suite
         || qc.rotation_id != plan.context.rotation_id
     {
         bail!("activation QC/capsule does not bind the exact plan");
+    }
+    if guardian_route(entry, &plan, true).is_ok() {
+        let prepared = entry
+            .provision
+            .epoch_store
+            .prepared
+            .as_ref()
+            .context("successor guardian has no locally prepared record")?;
+        if prepared.record.policy.config_ref != activated_capsule.config_ref
+            || prepared.record.policy.guardian_material_root
+                != activated_capsule.guardian_material_root
+            || prepared.record.policy.dpss_public_commitment
+                != activated_capsule.dpss_public_commitment
+        {
+            bail!("activated capsule differs from the guardian's prepared record");
+        }
     }
     {
         let session = session_mut(entry, &plan)?;
@@ -1396,9 +1450,9 @@ fn retire(
 mod tests {
     use super::*;
     use gp_crypto::{
-        EpochFrostShare, RecipientKeyPair, erasure_encode, erasure_reconstruct, frost_dealer_split,
-        frost_recover_dek_for_epoch, guardian_fragment_key_v3, guardian_share_key_v3,
-        merkle_commit, verifying_key_bytes,
+        EpochFrostShare, RecipientKeyPair, commit_ciphertext_fragments, erasure_encode,
+        erasure_reconstruct, frost_dealer_split, frost_recover_dek_for_epoch,
+        guardian_fragment_key_v3, guardian_share_key_v3, merkle_commit, verifying_key_bytes,
     };
     use gp_types::{
         AeadCiphertext, BeginRecoveryCertificateV3, BeginRotationCertificate, ConfigCapsuleV3,
@@ -1513,6 +1567,9 @@ mod tests {
 
         let ciphertext = b"already encrypted payload bytes; never decrypted during rotation";
         let fragments = erasure_encode(ciphertext, 3, 4).unwrap();
+        let fragment_commitment =
+            commit_ciphertext_fragments(&old_ref.config_id, old_ref.payload_generation, &fragments)
+                .unwrap();
         let old_public_commitment = frost_public_package_digest(&initial.public_package).unwrap();
         let mut records = Vec::new();
         let mut leaves = Vec::new();
@@ -1592,6 +1649,7 @@ mod tests {
             owner_cancel_public_key,
             dpss_suite: DpssSuiteId::default(),
             dpss_public_commitment: old_public_commitment,
+            ciphertext_fragment_root: fragment_commitment.root,
             guardian_material_root: old_material_root,
             encrypted_recovery_descriptor: AeadCiphertext {
                 nonce: [15; 24],
@@ -1989,7 +2047,6 @@ mod tests {
         assert_eq!(recovered_ciphertext, ciphertext);
         let successor_fragments = erasure_encode(&recovered_ciphertext, 3, 4).unwrap();
 
-        let mut drafts = BTreeMap::new();
         let mut successor_leaves = Vec::new();
         for (offset, id) in successor_ids.iter().enumerate() {
             let mut grant = gp_types::NewShareWrapGrant {
@@ -2032,6 +2089,29 @@ mod tests {
                 activation_qc_hash: None,
                 drain_deadline: None,
             };
+            if offset == 0 {
+                let mut invalid_proof = fragment_commitment.proofs[offset].clone();
+                invalid_proof[0] ^= 1;
+                let error = handle_guardian_rotation_v3(
+                    entries.get_mut(id).unwrap(),
+                    &guardian_identity_seeds[id],
+                    GuardianRotationRequestV3::StageMaterial {
+                        plan: plan.clone(),
+                        wrap_grant: grant.clone(),
+                        fragment_index: u16::try_from(offset + 1).unwrap(),
+                        ciphertext_fragment: successor_fragments[offset].clone(),
+                        ciphertext_fragment_proof: invalid_proof,
+                        policy: policy.clone(),
+                        opaque_slot_id: new_routes[offset].opaque_slot_id,
+                    },
+                    10,
+                    101,
+                    "test-boot",
+                    true,
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains("not committed"));
+            }
             let response = call(
                 entries.get_mut(id).unwrap(),
                 guardian_identity_seeds[id],
@@ -2040,14 +2120,17 @@ mod tests {
                     wrap_grant: grant,
                     fragment_index: u16::try_from(offset + 1).unwrap(),
                     ciphertext_fragment: successor_fragments[offset].clone(),
+                    ciphertext_fragment_proof: fragment_commitment.proofs[offset].clone(),
                     policy,
                     opaque_slot_id: new_routes[offset].opaque_slot_id,
                 },
                 101,
             );
+            let coordinator_view = serde_json::to_string(&response).unwrap();
+            assert!(!coordinator_view.contains("encrypted_dek_share"));
+            assert!(!coordinator_view.contains("record_draft"));
             let GuardianRotationResponseV3::RefreshMaterialStaged {
                 leaf,
-                record_draft,
                 public_package,
                 ..
             } = response
@@ -2056,20 +2139,17 @@ mod tests {
             };
             assert_eq!(public_package, refreshed_public);
             successor_leaves.push(sha256(&gp_wire::prepared_record_leaf_v3(&leaf).unwrap()));
-            drafts.insert(*id, *record_draft);
         }
         let (successor_root, successor_proofs) = merkle_commit(&successor_leaves).unwrap();
         let mut prepared_acks = Vec::new();
         for (offset, id) in successor_ids.iter().enumerate() {
-            let mut record = drafts.remove(id).unwrap();
-            record.policy.guardian_material_root = successor_root;
-            record.merkle_path_proof = successor_proofs[offset].clone();
             let response = call(
                 entries.get_mut(id).unwrap(),
                 guardian_identity_seeds[id],
                 GuardianRotationRequestV3::PrepareCommit {
                     plan: plan.clone(),
-                    record,
+                    guardian_material_root: successor_root,
+                    merkle_path_proof: successor_proofs[offset].clone(),
                     dpss_result_commitment,
                 },
                 101,
@@ -2123,6 +2203,9 @@ mod tests {
             prepared_acks,
             old_handoff_acks: handoff_acks,
         };
+        let mut mismatched_root = ready.clone();
+        mismatched_root.prepared_acks[0].guardian_material_root[0] ^= 1;
+        assert!(gp_wire::rotation_ready_certificate(&mismatched_root).is_err());
         let ready_hash = sha256(&gp_wire::rotation_ready_certificate(&ready).unwrap());
         let mut successor_capsule = ConfigCapsuleV3 {
             protocol_version: PROTOCOL_VERSION_V3,
@@ -2139,6 +2222,7 @@ mod tests {
             owner_cancel_public_key: old_capsule.owner_cancel_public_key,
             dpss_suite: DpssSuiteId::default(),
             dpss_public_commitment: dpss_result_commitment,
+            ciphertext_fragment_root: old_capsule.ciphertext_fragment_root,
             guardian_material_root: successor_root,
             encrypted_recovery_descriptor: successor_descriptor,
             activation_certificate: None,

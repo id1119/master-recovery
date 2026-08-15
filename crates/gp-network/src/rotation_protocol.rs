@@ -848,6 +848,7 @@ mod tests {
             owner_cancel_public_key: [4; 32],
             dpss_suite: DpssSuiteId::default(),
             dpss_public_commitment: [marker; 32],
+            ciphertext_fragment_root: [marker.wrapping_add(2); 32],
             guardian_material_root: [marker.wrapping_add(1); 32],
             encrypted_recovery_descriptor: AeadCiphertext {
                 nonce: [marker; 24],

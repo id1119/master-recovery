@@ -796,6 +796,44 @@ mod tests {
             refreshed[&6].as_slice(),
         ];
         assert_ne!(frost_recover_dek(&mixed, 5).unwrap(), output.dek);
+        let epoch1 = ConfigRef {
+            config_id: [41; 32],
+            payload_generation: 1,
+            authorization_epoch: 1,
+            guardian_epoch: 1,
+            epoch_binding: [42; 32],
+        };
+        let epoch2 = ConfigRef {
+            guardian_epoch: 2,
+            epoch_binding: [43; 32],
+            ..epoch1
+        };
+        let labelled_mixed = vec![
+            EpochFrostShare {
+                config_ref: epoch1,
+                encoded_share: output.shares[0].as_slice(),
+            },
+            EpochFrostShare {
+                config_ref: epoch1,
+                encoded_share: output.shares[1].as_slice(),
+            },
+            EpochFrostShare {
+                config_ref: epoch2,
+                encoded_share: refreshed[&3].as_slice(),
+            },
+            EpochFrostShare {
+                config_ref: epoch2,
+                encoded_share: refreshed[&5].as_slice(),
+            },
+            EpochFrostShare {
+                config_ref: epoch2,
+                encoded_share: refreshed[&6].as_slice(),
+            },
+        ];
+        assert!(matches!(
+            frost_recover_dek_for_epoch(&labelled_mixed, &epoch2, 5),
+            Err(CryptoError::InvalidFrostParticipant)
+        ));
 
         let mut corrupted_round1 = round1[&2].broadcast.clone();
         let corrupted_offset = corrupted_round1.len() / 2;

@@ -1,5 +1,8 @@
 # Robust and Proactive Secret Sharing: A Survey of Improvements over Basic Shamir SSS
 
+> Historical research only (2026-08-15). Master Recovery does not implement
+> these constructions locally; see `../../SHAMIR_AUDIT.md`.
+
 This document surveys seven families of improvements over the plain (t+1, n)-Shamir secret sharing scheme (SSS). Each improvement is documented with: (1) identity, (2) problem summary, (3) exact algorithm details, (4) cost comparison, (5) composability notes, and (6) implementation pitfalls. All share arithmetic is over GF(q) (typically a large prime field or GF(2^m)); Shamir's scheme shares a secret s as f(0) for a random polynomial f of degree t, giving share w_i = f(x_i) to player P_i, with reconstruction by Lagrange interpolation of any t+1 shares.
 
 ---

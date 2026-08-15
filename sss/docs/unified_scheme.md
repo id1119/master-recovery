@@ -1,5 +1,9 @@
 # The Unified Scheme (U-SSS) — design, improvements, assumptions, implementation
 
+> Historical research archive (2026-08-15): this proposed Python construction
+> was not adopted and its implementation was removed. Master Recovery uses the
+> maintained-library profiles documented in `../../SHAMIR_AUDIT.md`.
+
 This document is the in-depth writeup of the project's centerpiece variation:
 **the unified scheme v4** in `shamir/unified.py` (~2000 lines, pure stdlib).
 It is one (t+1)-of-n secret-sharing construction over a 2048-bit safe-prime

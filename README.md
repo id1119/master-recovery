@@ -155,6 +155,9 @@ Use `0` for a guardian/signer option to disable that adversarial toggle.
   polynomial, repair, or combiner math is implemented locally.
 - Reed–Solomon erasure coding over encrypted payload bytes.
 - SHA-256 commitments and Merkle membership proofs.
+- A capsule-bound Merkle commitment to the deterministic raw ciphertext
+  fragments; successors reject corrupt or index-substituted rotation material
+  before preparation.
 - Canonical length-prefixed signature transcripts with domain separation.
 - Ed25519 signer and guardian signatures.
 - X-Wing recipient encryption bound to request-specific AEAD context.
@@ -165,6 +168,9 @@ Use `0` for a guardian/signer option to disable that adversarial toggle.
   and the simulator; secret provider journals are node-locally encrypted.
 - Live v3 setup, witness discovery, signer-authorized rotation, sealed direct
   DPSS rounds, atomic activation, repeated rotation, and final recovery.
+- Successor guardians retain their wrapped DEK shares and complete records
+  locally during rotation; the A-holding coordinator sees only commitment
+  leaves and therefore cannot unwrap a threshold from its own transcript.
 - Owner-only hard cancellation using a per-config private key created at setup.
 - Signer-side request-id/nonce replay protection and guardian cancellation
   tombstones that survive Begin/cancel message reordering.

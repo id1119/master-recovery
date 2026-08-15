@@ -401,6 +401,7 @@ mod tests {
             owner_cancel_public_key: owner_key,
             dpss_suite: DpssSuiteId::default(),
             dpss_public_commitment: [7; 32],
+            ciphertext_fragment_root: [11; 32],
             guardian_material_root: [8; 32],
             encrypted_recovery_descriptor: AeadCiphertext {
                 nonce: [9; 24],

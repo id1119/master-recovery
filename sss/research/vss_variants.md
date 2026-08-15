@@ -1,5 +1,8 @@
 # Verifiable Secret Sharing (VSS) improvements over plain Shamir — research survey
 
+> Historical research only (2026-08-15). These variants were evaluated but
+> not adopted as local cryptography; see `../../SHAMIR_AUDIT.md`.
+
 Implementation-ready notes on the major VSS constructions, from Feldman (1987) through
 KZG/NI-VSS (2023-2025). Baseline for every comparison is **plain Shamir secret sharing**
 (Shamir, "How to share a secret", CACM 22(11), 1979; DOI 10.1145/359168.359176): a
