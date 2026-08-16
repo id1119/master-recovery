@@ -1,8 +1,15 @@
-# Threshold Sharing Audit
+# Threshold-sharing audit
 
 Date: 2026-08-15
 
-## Final result
+## Why this audit exists
+
+Threshold sharing is easy to misuse even when the underlying library is sound.
+This audit records which implementation protects each protocol secret, what
+the local wrappers enforce, and why an experimental hand-written implementation
+is not part of the runtime.
+
+## Final implementation
 
 Master Recovery has two deliberately separate, maintained-library threshold
 profiles:
@@ -18,9 +25,9 @@ combiner arithmetic is implemented locally. Direct library calls remain inside
 `gp-crypto`. The v3 `DEK` is the provider's serialized 32-byte Ristretto scalar,
 not an arbitrary uniformly sampled 256-bit string.
 
-## Branch and implementation disposition
+## Disposition of the experimental branch
 
-The final review inspected every remote head present on 2026-08-15:
+The review inspected every remote head present on 2026-08-15:
 
 - `origin/animation` and `origin/docker` were already ancestors of `main`;
 - `origin/sss-hardening` contained five unmerged commits and was merged so its
@@ -35,8 +42,8 @@ The final review inspected every remote head present on 2026-08-15:
   `MASTER_PROMPT.md` and `AGENTS.md`, so the final tree removes it. The branch
   history remains reachable through the merge and can be retired.
 
-This is a compatibility and security decision, not a claim that useful
-research ideas were ignored: only constructions that fit the fixed protocol
+The branch preserved useful test cases and research history, but its arithmetic
+does not run in Master Recovery. Only constructions that fit the fixed protocol
 and have a maintained implementation are enabled.
 
 ## `blahaj` wrapper audit
@@ -58,7 +65,7 @@ Shamir: integrity comes from the protocol's AEAD envelopes, signed exact-request
 contributions, index binding, and Merkle record commitments. Invalid material is
 rejected before interpolation and is treated as an erasure.
 
-## FROST v3 `DEK` audit
+## v3 `DEK` and FROST
 
 The thin provider adapter enforces thresholds `2..=n`, `n <= 32`, bounded
 serialized packages, unique participant identifiers, one common verifying key,
@@ -85,12 +92,12 @@ epoch concept and is therefore not a protocol entry point. Regression tests
 show that a mixed raw set does not recover the `DEK`, while the production
 epoch-labelled wrapper rejects it before interpolation.
 
-## Ciphertext-fragment compatibility across rotation
+## Ciphertext fragments across rotation
 
 The encrypted payload and its Reed-Solomon parameters remain unchanged during
 routine v3 guardian rotation. The setup capsule now commits to every raw
 ciphertext fragment with a domain-separated Merkle root bound to `config_id`,
-`payload_generation`, fragment index, total shard count, length, and bytes.
+`payload_generation`, fragment index, total fragment count, length, and bytes.
 
 On every rotation the coordinator reconstructs ciphertext from threshold-valid
 old records, deterministically re-encodes it, and must reproduce the stable
@@ -100,7 +107,7 @@ case where a malicious coordinator could previously provision internally
 committed but unusable successor fragments. It does not reveal plaintext and it
 does not make sampled custody checks a proof of retrievability.
 
-## Compatible and incompatible improvement families
+## Included and excluded improvement families
 
 | Family | Disposition |
 |---|---|
@@ -112,7 +119,7 @@ does not make sampled custody checks a proof of retrievability.
 | Custom robust decoding, finite-field arithmetic, hybrid combiners, or share-conversion math | prohibited; no local implementation is retained |
 | Dealer-free v2 setup or v3 `A` refresh | not implemented |
 
-## Test evidence
+## Evidence
 
 The Rust tests cover:
 
@@ -151,24 +158,24 @@ from the final Apple arm64 run were:
 
 | Operation | Time interval |
 |---|---:|
-| `blahaj` split 2-of-3, pre-hardening | 1.252–1.313 us |
-| `blahaj` split 2-of-3, strict wrapper | 1.488–1.727 us |
-| `blahaj` recover 2-of-3, pre-hardening | 457–477 ns |
-| `blahaj` recover 2-of-3, strict wrapper | 483–547 ns |
-| `blahaj` split 5-of-8, pre-hardening | 3.501–3.590 us |
-| `blahaj` split 5-of-8, strict wrapper | 3.877–4.045 us |
-| `blahaj` recover 5-of-8, pre-hardening | 1.345–1.421 us |
-| `blahaj` recover 5-of-8, strict wrapper | 1.320–1.360 us |
-| FROST dealer split 5-of-8 | 1.148–1.205 ms |
-| FROST recover 5-of-8 | 169.2–172.3 us |
-| FROST complete 8-participant refresh, 5-of-8 | 16.06–16.60 ms |
+| `blahaj` split 2-of-3, pre-hardening | 1.252-1.313 us |
+| `blahaj` split 2-of-3, strict wrapper | 1.488-1.727 us |
+| `blahaj` recover 2-of-3, pre-hardening | 457-477 ns |
+| `blahaj` recover 2-of-3, strict wrapper | 483-547 ns |
+| `blahaj` split 5-of-8, pre-hardening | 3.501-3.590 us |
+| `blahaj` split 5-of-8, strict wrapper | 3.877-4.045 us |
+| `blahaj` recover 5-of-8, pre-hardening | 1.345-1.421 us |
+| `blahaj` recover 5-of-8, strict wrapper | 1.320-1.360 us |
+| FROST dealer split 5-of-8 | 1.148-1.205 ms |
+| FROST recover 5-of-8 | 169.2-172.3 us |
+| FROST complete 8-participant refresh, 5-of-8 | 16.06-16.60 ms |
 
 The stricter byte-Shamir wrapper adds measurable relative overhead in several
 microbenchmarks, but at most hundreds of nanoseconds for the actual key sizes;
 it is immaterial beside network and user-authorized delay costs. These numbers
 demonstrate practicality, not a universal speedup or constant-time behavior.
 
-## Exact non-claims
+## Limits
 
 The implementation does not claim standalone robust Shamir interpolation,
 dealer verifiability for `blahaj`, constant-time GF(256), side-channel immunity,

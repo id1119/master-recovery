@@ -1,118 +1,108 @@
-# Guardian Rotation for Master Recovery
+# Guardian rotation
 
 Status: authoritative protocol-v3 Guardian Rotation specification.
 
 Date: 2026-08-15
 
-This document follows the requested eight-phase analysis. On 2026-08-14 the
-owner explicitly authorized this document as the protocol-v3 Guardian Rotation
-specification and selected Zcash Foundation FROST RTS plus DKG share refresh.
-`MASTER_PROMPT.md` incorporates that decision. Protocol v2 remains immutable
-and recovery-only; rotation requires an explicit migration to v3.
+Protocol v2 remains a recovery-only protocol. A configuration must explicitly
+migrate to v3 before it can replace a guardian without rebuilding the whole
+configuration. `MASTER_PROMPT.md` records this design choice and remains the
+higher source of truth.
 
-## Executive decision
+For the recovery flow and actor model, read
+[`HOW_IT_WORKS.md`](HOW_IT_WORKS.md) first. This document preserves the full
+wire, state-machine, storage, and failure analysis for rotation.
 
-The strongest long-term design is **Staged Verifiable Guardian Epochs**:
+## Why rotation exists
 
-1. every recovery and rotation is bound to one immutable guardian epoch;
-2. a signer threshold authorizes an exact proposed successor epoch through a
-   Begin -> Delay -> Release -> Activate flow;
-3. the setup-time owner cancellation key can permanently veto the exact
-   rotation before activation;
-4. a reviewed dynamic proactive secret-sharing (DPSS) protocol transfers and
-   refreshes the DEK sharing from the old committee to the new committee
-   without reconstructing DEK at one participant;
-5. ciphertext fragments are repaired from threshold-valid encrypted
-   ciphertext fragments without decrypting the payload;
-6. every new guardian is durably provisioned before an activation certificate
-   can be committed;
-7. a small Byzantine quorum of non-enumerable config witnesses makes one
-   successor epoch atomic and lets a fresh client reject rollback;
-8. old epochs drain already-pending recoveries and are then securely erased.
+A guardian can go offline, lose its record, or become untrusted. Protocol v3
+replaces that guardian while keeping the protected secret, ciphertext, public
+configuration identifier, authorization key `A`, and Recovery Card unchanged.
 
-This is not implementable by merely extending the current `blahaj` wrapper.
-The current guardians never possess plaintext DEK shares: they store
-`E_i = AEAD(HKDF(A, ...), D_i)`. A DPSS handoff therefore needs a
-signer-authorized, per-guardian unwrap grant so each old guardian can operate
-on its own `D_i` in zeroizing memory. It also needs a complete reviewed DPSS
-implementation, not locally written finite-field or resharing code.
+```text
+epoch 7: G1 G2 G3 G4 G5 G6 G7 G8
+                       |
+                       | replace G4 with G9
+                       v
+epoch 8: G1 G2 G3 G9 G5 G6 G7 G8
+```
 
-The selected implementation is `frost-ristretto255` 3.x from the Zcash
-Foundation FROST project. A replacement first receives one freshly issued
-share through the library's Repairable Threshold Scheme (RTS, based on ePrint
-2017/1155). The exact successor roster then runs the library's DKG share-refresh
-protocol, whose zero-constant polynomials retain the Ristretto255 scalar DEK
-while independently refreshing every successor share and excluding the retired
-guardian. All participants must agree on the complete round transcript; the
-application does not use the library as a partial-quorum consensus protocol.
+The operation changes every guardian's `DEK` share, not just the replacement's
+share. That full refresh prevents an old share from being treated as current
+material and removes the retired guardian from the successor roster.
 
-The library is maintained and the FROST codebase has a historical NCC audit,
-but DKG refresh was added after that audit. The exact RTS + DKG-refresh
-integration therefore requires professional cryptographic review before a
-production deployment. This prototype uses only the library APIs: it does not
-implement field arithmetic, Shamir interpolation, VSS commitments, repair
-equations, or the FROST combiner locally.
+## Implemented flow
 
-Therefore:
+1. A signer threshold approves the exact predecessor epoch, successor roster,
+   replacement, recovery recipient, nonce, and transcript.
+2. The request follows Begin -> Delay -> Release. The setup-time owner
+   cancellation key may permanently veto that exact rotation before activation.
+3. A threshold of old guardians uses the Zcash Foundation FROST Repairable
+   Threshold Scheme (RTS) to issue material for the replacement.
+4. The complete successor roster runs FROST refresh-DKG. The underlying `DEK`
+   stays the same, but all successor shares are new and epoch-bound.
+5. Ciphertext is reconstructed from valid fragments and deterministically
+   re-encoded. The payload is never decrypted during rotation.
+6. Every successor stores a complete `PREPARED` Guardian Record and proves its
+   committed fragment before activation can proceed.
+7. Signer and witness certificates select one successor epoch. The old epoch
+   rejects new recovery requests, drains requests accepted before activation,
+   and then retires.
 
-- **Implemented target:** Staged Verifiable Guardian Epochs with
-  `frost-ristretto255` RTS + full-roster DKG refresh.
-- **Safe interim/fallback:** an owner-controlled, recovery-equivalent epoch
-  rebuild using the current primitives. It can avoid reconstructing the
-  plaintext, but it reconstructs A and DEK in one client and is not proactive
-  distributed resharing.
-- **Implementation gate satisfied for the prototype:** the construction and
-  maintained compiling provider are named above. Do not copy equations from a
-  paper into `gp-crypto`. Production enablement remains gated on an external
-  review of this integration.
+The coordinator orchestrates the exchange and knows `A`, but does not receive
+payload plaintext or a reconstructable set of `DEK` shares. Provider messages
+are signed, sequence-checked, and X-Wing sealed to their exact destinations.
+Successor Guardian Records stay guardian-local; the coordinator receives their
+commitment leaves and returns the resulting Merkle root and paths.
 
-## Implemented prototype evidence
+## What changes and what stays the same
 
-The repository now contains both deterministic and live-network executions of
-this design:
+| Stays the same | Changes |
+|---|---|
+| protected secret and encrypted payload | guardian epoch and roster |
+| authorization key `A` | every successor `DEK` share |
+| underlying `DEK` scalar | Guardian Record commitments and mailbox aliases |
+| config id and Recovery Card | witness-selected current `ConfigRef` |
+| payload-generation fragment root | active, draining, and retired storage state |
 
-- `gp-core::RotationMachine` is serialized inside each live guardian session
-  and is also used by `gp-sim`; no separate network activation shortcut exists;
-- `gp-network setup-v3`, `rotate-v3`, `discover-v3`, and `recover-v3` execute
-  the complete actor flow through TCP/HTTP relay mailboxes;
-- ZF FROST RTS provider messages and refresh-DKG direct messages are signed,
-  sequence checked, and X-Wing sealed to the exact peer; coordinator-visible
-  objects contain ciphertext fragments but no DEK share or payload plaintext;
-- every successor record is staged, Merkle-committed, and durably PREPARED
-  before signer Activate votes and the witness QC. The record and its encrypted
-  DEK share remain local to that guardian: the coordinator receives only the
-  prepared-record leaf and returns the resulting Merkle root/path;
-- abort requires a signer threshold rather than one signer's signature;
-- `cancel-rotation-v3` first persists a `2f+1` witness veto against the exact
-  rotation, then persists owner-authorized tombstones at enough old guardians
-  to break the handoff quorum. Signers release predecessor plan locks only
-  after validating that owner certificate plus the witness-veto proof; a
-  non-owner cleanup instead requires a signer-threshold Abort certificate;
-- old fragment contributions carry their complete committed record leaf, so
-  the coordinator verifies the predecessor material-root proof before using a
-  ciphertext fragment;
-- the setup capsule also commits to the deterministic raw Reed-Solomon
-  fragment set. Every successor verifies its exact fragment and index against
-  that stable payload-generation root before signing a preparation receipt;
-- activation derives its draining-request set locally at each guardian. New
-  old-epoch Begin requests are rejected while exact pre-activation requests
-  remain drainable;
-- `tools/test-v3-network.sh` proves live setup and recovery, shuts down the
-  guardian being replaced and one of four witnesses, owner-cancels and retries
-  an in-flight rotation, completes two consecutive replacements using the
-  remaining `2f+1` witnesses, discovers epoch 3 with the unchanged Recovery
-  Card, and performs byte-identical recovery. The coordinator result records
-  zero payload decryptions.
+The Recovery Card is still only a locator and verifier. It does not contain
+`A`, the `DEK`, a share, or the private guardian roster.
 
-This evidence completes the hackathon-prototype path, not the production gate.
-The exact RTS + refresh integration still lacks the external cryptographic
-review required by section 8.5. The ephemeral CLI also preserves safe actor
-state but is not yet a replicated, automatically resumed coordinator job after
-an arbitrary coordinator-process crash.
+## Historical shares
+
+Every recovery contribution is bound to an exact `ConfigRef`, including the
+guardian epoch. The recovery wrapper rejects mixed epochs before calling the
+FROST reconstruction API. A retired node may still hold stale bytes if secure
+erasure fails, but signers, current guardians, and witnesses will not accept
+those bytes as current-epoch material.
+
+Proactive protection has a time boundary. It assumes authenticated private
+channels, successful erasure where supported, and no complete threshold
+compromise within one guardian epoch. Rotation cannot undo a compromise that
+already exposed a reconstructable set of shares.
+
+## Prototype status and limits
+
+The repository implements deterministic and live-network setup, recovery,
+cancellation, discovery, and repeated one-for-one guardian replacement. The
+same `gp-core::RotationMachine` drives simulation and live guardian sessions.
+`tools/test-v3-network.sh` exercises owner cancellation, an offline old
+guardian, an offline witness, two completed replacements, unchanged-card
+discovery, and byte-identical final recovery.
+
+The selected provider is `frost-ristretto255` 3.x. The repository uses its RTS
+and refresh-DKG APIs and contains no local field, polynomial, interpolation,
+repair, VSS, or combiner arithmetic. The FROST codebase has historical NCC
+review, but refresh-DKG was added later. The exact integration still needs an
+external cryptographic review before production use.
+
+The live coordinator is ephemeral rather than a replicated, automatically
+resumed job. The implemented flow replaces one guardian while keeping the same
+roster size and threshold. These are prototype limits, not protocol guarantees.
 
 ---
 
-# PHASE 1 — Existing protocol analysis
+# Existing protocol analysis
 
 ## 1.1 Protocol-v2 baseline cryptographic state
 
@@ -142,7 +132,7 @@ The v2 implementation facts that motivated the v3 amendment are:
 - guardian state is keyed by one opaque mailbox/slot and one
   `GuardianPolicy` with exactly one `config_version`.
 - `GuardianMachine` rejects any request not equal to its one current version.
-- the v2 simulator's “rotation” is a complete new setup after plaintext recovery.
+- the v2 simulator's "rotation" is a complete new setup after plaintext recovery.
   It creates fresh A, DEK, shares, ciphertext and slots from the recovered
   plaintext. It is not guardian repair or proactive refresh.
 - the v2 network config store is deliberately write-once. It rejects a second
@@ -183,7 +173,7 @@ Path 2 is not supported by `blahaj` or by the existing message/state model.
 
 ### Changing DEK without plaintext
 
-It is not possible with the current AEAD layout. Replacing DEK requires
+The current AEAD layout cannot do this. Replacing DEK requires
 decrypting C and encrypting the plaintext under the new DEK. Re-sharing the
 same DEK can refresh custody shares without plaintext, but cannot revoke a DEK
 or an old threshold that was already learned.
@@ -220,8 +210,8 @@ rotation advances only `guardian_epoch` and retains payload generation and DEK.
 3. With the present A-wrapping, no: some signer-threshold-derived A authority
    must provide old/new per-guardian unwrap/wrap keys. A can remain confined to
    a rotation coordinator; it need not be sent to guardians.
-4. The current architecture supports only recovery-equivalent dealer rotation,
-   not safe non-custodial proactive rotation.
+4. The v2 baseline supports only recovery-equivalent dealer rotation. The v3
+   implementation adds the distributed one-for-one replacement described here.
 5. The smallest change for dealer rotation is guardian epochs plus signed
    two-phase activation and fresh-client rollback protection. The smallest
    change for no-single-party rotation is larger: add a vetted DPSS share
@@ -229,7 +219,7 @@ rotation advances only `guardian_epoch` and retains payload generation and DEK.
 
 ---
 
-# PHASE 2 — Requirements and threat model
+# Requirements and threat model
 
 ## 2.1 Required safety invariants
 
@@ -312,7 +302,7 @@ The design considers:
   replay.
 
 The guardian recovery threshold k is not automatically the active Byzantine
-resharing bound. For example, “5-of-8 can recover with three unavailable” does
+resharing bound. For example, "5-of-8 can recover with three unavailable" does
 not prove that an asynchronous malicious-party DPSS protocol can complete with
 the same five. The DPSS suite must expose a separately reviewed:
 
@@ -329,7 +319,7 @@ those bounds. It must not silently reuse k as a Byzantine quorum.
 
 ## 2.3 Four different operations
 
-The protocol must not call all changes “rotation”:
+The protocol must not call all changes "rotation":
 
 | Operation | Membership | DEK shares | DEK | Payload ciphertext |
 |---|---|---|---|---|
@@ -357,9 +347,9 @@ different hardware or quantum assumption and is not part of this proposal.
 
 ---
 
-# PHASE 3 — Candidate designs
+# Candidate designs
 
-## Candidate A — Logical-slot copy
+## Candidate A - Logical-slot copy
 
 The exiting guardian transfers the exact `F_i`, `E_i`, policy and slot role to
 a new guardian. The descriptor changes only in routing information.
@@ -383,7 +373,7 @@ Decision: reject as the long-term mechanism. It may be an emergency
 availability copy only if explicitly labeled non-refreshing and followed by a
 real epoch refresh.
 
-## Candidate B — Recovery-equivalent dealer rebuild
+## Candidate B - Recovery-equivalent dealer rebuild
 
 A fresh, owner-controlled rotation client follows the existing recovery path,
 reconstructs A and DEK, reconstructs encrypted C, creates a fresh Shamir
@@ -411,7 +401,7 @@ Limitations:
 Decision: retain only as the explicit owner-assisted fallback and migration
 path. Subject it to the full recovery delay and owner cancellation window.
 
-## Candidate C — Verifiable dynamic proactive resharing
+## Candidate C - Verifiable dynamic proactive resharing
 
 After signer authorization and delay, each old guardian receives only its own
 A-derived unwrap grant, decrypts its own `D_i` in zeroizing memory, and runs a
@@ -429,7 +419,8 @@ Benefits:
 - no single participant reconstructs DEK;
 - provides genuine mobile-adversary protection under per-epoch corruption and
   secure-erasure assumptions;
-- repairs missing members and changes membership/thresholds;
+- repairs a missing member and changes membership in the implemented
+  fixed-size, fixed-threshold profile;
 - malicious subshares are detected by the selected construction;
 - successor correctness is not based solely on trusting a new dealer.
 
@@ -440,18 +431,18 @@ Costs and incompatibilities:
   equivalent agreement layer, complaint handling and crash recovery;
 - rotation participants necessarily learn session-scoped pseudonymous
   committee membership needed by the construction. This weakens the current
-  “one guardian does not learn the full set” claim, although the roster remains
+  "one guardian does not learn the full set" claim, although the roster remains
   absent from public state and operator identities/routes can remain hidden;
 - reviewed constructions such as CHURP use assumptions and infrastructure
   (polynomial commitments, often public committee coordination) not present in
   this protocol;
-- no directly suitable maintained Rust library was verified.
+- the exact provider integration requires external review.
 
-Decision: selected as the production target, with implementation blocked until
-the authoritative specification accepts the limited metadata tradeoff and
-names a vetted implementation.
+Decision: selected and implemented for the prototype with ZF FROST RTS plus
+full-roster refresh-DKG. Production use remains blocked on external review of
+the exact integration and its limited metadata tradeoff.
 
-## Candidate D — Wrapper key, proxy re-encryption, or extra custody secret
+## Candidate D - Wrapper key, proxy re-encryption, or extra custody secret
 
 Introduce a stable custody key or proxy-re-encryptable wrapper so stored DEK
 shares can be rewrapped for replacement guardians without opening them.
@@ -496,7 +487,7 @@ Decision: reject.
 
 ---
 
-# PHASE 4 — Adversarial review
+# Adversarial review
 
 ## 4.1 Attacks on logical-slot copying
 
@@ -530,8 +521,8 @@ guardians to add subshares is not sufficient:
   whose proof covers that exact mobile-adversary model;
 - published work has found attacks in proposed proactive VSS variants.
 
-Therefore the repository must consume a complete reviewed DPSS protocol, not
-assemble a new one from `split_secret`, scalar arithmetic and message glue.
+The repository must consume a complete reviewed DPSS protocol. It must not
+assemble one from `split_secret`, scalar arithmetic, and message glue.
 
 ## 4.4 Attacks on the DPSS control plane
 
@@ -598,7 +589,7 @@ discarded.
 
 ---
 
-# PHASE 5 — Final architecture
+# Detailed architecture
 
 ## 5.1 Version and cryptographic state
 
@@ -801,7 +792,7 @@ state never changes recovery authority.
 
 ## 5.7 Complete protocol
 
-### Step 1 — Authorize descriptor opening
+### Step 1 - Authorize descriptor opening
 
 The coordinator creates a fresh rotation-recipient KEM keypair and a
 `RotationIntent` bound to the read-quorum-confirmed predecessor, reason,
@@ -815,7 +806,7 @@ otherwise unavailable. The intent is deliberately not a Begin certificate:
 no guardian accepts it, no delay starts, and it authorizes no record, unwrap or
 DPSS operation.
 
-### Step 2 — Propose the exact plan, Begin and delay
+### Step 2 - Propose the exact plan, Begin and delay
 
 After learning the old roster, the coordinator selects the complete successor
 committee and creates the exact `RotationPlan`. Signers verify that it conforms
@@ -836,13 +827,13 @@ The owner may send `OwnerRotationCancelCertificate`. Honest guardians persist
 the cancellation before acknowledging. Completion requires enough old
 guardian acknowledgements to leave fewer than the DPSS minimum handoff quorum.
 
-### Step 3 — Release authorization
+### Step 3 - Release authorization
 
 After each old guardian's local delay, signers issue fresh Release votes for
 the unchanged plan. No old guardian unwraps a share or sends a fragment without
 both its persisted Begin, elapsed delay and valid Release certificate.
 
-### Step 4 — Issue per-guardian grants, not DEK
+### Step 4 - Issue per-guardian grants, not DEK
 
 The coordinator uses the A reconstructed for the descriptor-open intent to
 derive:
@@ -860,7 +851,7 @@ certificate. This is the same kind of guardian-enforced delay boundary used by
 recovery; the delay does not claim to keep A from the intent-authorized
 coordinator.
 
-### Step 5 — Repair encrypted payload fragments
+### Step 5 - Repair encrypted payload fragments
 
 At least k old guardians send their committed F_i to the coordinator under the
 release certificate. The coordinator verifies their record Merkle proofs,
@@ -872,7 +863,7 @@ against that root before preparation. The coordinator never decrypts C.
 If fewer than k valid fragments exist, automatic rotation aborts. There is no
 way to regenerate C from less than k under the current erasure code.
 
-### Step 6 — DPSS handoff
+### Step 6 - DPSS handoff
 
 Each qualified old guardian:
 
@@ -902,17 +893,17 @@ The selected DPSS construction must guarantee either one consistent successor
 sharing of the same DEK or abort. Master Recovery does not define its own
 complaint, disqualification or polynomial arithmetic rules.
 
-### Step 7 — Ready
+### Step 7 - Ready
 
 The coordinator requires all advertised new guardians to produce valid
-Prepared acknowledgements. Activating “8 guardians” with only five stored
+Prepared acknowledgements. Activating "8 guardians" with only five stored
 records is forbidden. A failed candidate is replaced while the old epoch is
 still active, and the successor commitment is regenerated.
 
 The Ready certificate commits to every prepared record leaf, the new encrypted
 descriptor, the DPSS result commitment, all thresholds and all ack digests.
 
-### Step 8 — Activate atomically
+### Step 8 - Activate atomically
 
 Signers inspect the Ready certificate and produce Activate votes. A threshold
 forms `RotationActivateCertificate` over the exact new capsule hash.
@@ -928,7 +919,7 @@ The coordinator submits it to the config witnesses. An honest witness:
 `2f + 1` witness acks form `EpochActivationQC`. This QC, not a coordinator
 message or timeout, makes the new epoch ACTIVE.
 
-### Step 9 — Drain and retire
+### Step 9 - Drain and retire
 
 Old guardians stop accepting new Begins after observing the activation QC, but
 continue exact old-epoch requests that were already DelayPending. Those
@@ -1004,7 +995,7 @@ both under the stated bound.
 | 5. Messages | The canonical message set in section 5.5 binds the exact plan, epoch, recipient and expiry. |
 | 6. Material received | Coordinator gets A/C; each old guardian gets only `K_i`; each new guardian gets one DPSS share, `K'_j`, one fragment and policy. |
 | 7. Material never learned | No guardian/signers/witness/auditor learns plaintext or DEK; DPSS coordinator never learns D shares/DEK. |
-| 8. Missing material repair | Reconstruct C from k committed fragments; reconstruct no missing old D share—DPSS proceeds only with its qualified old quorum. |
+| 8. Missing material repair | Reconstruct C from k committed fragments; reconstruct no missing old D share-DPSS proceeds only with its qualified old quorum. |
 | 9. Share migration | A vetted DPSS creates an independently randomized sharing of the same DEK. |
 | 10. Provisioning proof | Every advertised new guardian signs only after an atomic durable write; all n acks are required. |
 | 11. Activation | Signer Activate certificate plus `2f+1` witness acks forms the unique activation QC. |
@@ -1022,7 +1013,7 @@ both under the stated bound.
 
 ---
 
-# PHASE 6 — Security argument
+# Security argument
 
 ## 6.1 Confidentiality
 
@@ -1274,12 +1265,12 @@ attributable signed cryptographic evidence.
 
 A signer threshold can authorize and activate rotation after the normal delay.
 The owner need not participate. If the cancellation key is unavailable, there
-is no veto—exactly the existing recovery limitation. If the DPSS quorum is
+is no veto-exactly the existing recovery limitation. If the DPSS quorum is
 lost, user/owner-assisted recovery becomes unavoidable.
 
 ---
 
-# PHASE 7 — Integration plan
+# Integration notes
 
 ## 7.1 Authoritative documentation
 
@@ -1400,7 +1391,7 @@ Normal path:
 
 ```text
 Guardian unhealthy. Replacement in progress.
-Preparing 8/8 guardian records…
+Preparing 8/8 guardian records...
 Guardian epoch 12 active. 8/8 healthy. No action required.
 ```
 
@@ -1409,28 +1400,23 @@ Expose:
 - current/previous guardian epoch and health count;
 - PREPARING versus ACTIVE clearly;
 - delay/cancellation window;
-- “old epoch remains recoverable” during preparation;
+- "old epoch remains recoverable" during preparation;
 - exact reason automatic rotation stopped;
 - a critical action only when DPSS/recovery quorum is no longer available.
 
-Never display “proof of storage” for a Merkle commitment or sampled audit.
+Never display "proof of storage" for a Merkle commitment or sampled audit.
 
-## 7.11 Implementation order
+## 7.11 Implementation status
 
-1. authoritative v3 specification and threat-model review;
-2. DPSS library selection, independent audit evidence and compatibility PoC;
-3. types/transcripts plus deterministic state machines;
-4. config-witness register and rollback tests;
-5. DPSS adapter with test-only in-memory transport;
-6. fragment repair and prepared-record storage;
-7. network coordinator/handlers;
-8. simulator/adversarial controls;
-9. custody sampling and GUI;
-10. migration tooling and external review.
+The repository contains the v3 types and transcripts, deterministic state
+machines, witness register, FROST adapter, fragment repair, prepared-record
+storage, network coordinator and handlers, simulator controls, custody
+sampling, and adversarial tests. Explicit v2-to-v3 migration tooling and an
+external review of the FROST integration remain incomplete.
 
 ---
 
-# PHASE 8 — Tests
+# Tests
 
 ## 8.1 Deterministic unit tests
 
@@ -1512,17 +1498,18 @@ Implementation is not complete until evidence shows:
 
 ---
 
-# PHASE 9 — Self-critique and revision check
+# Revision checks
 
 ## 9.1 Hidden assumptions
 
-The largest hidden assumption would be to write “use DPSS” as if it were one
-interchangeable primitive. It is not. The production claim depends on a named
-construction whose proof covers dynamic old/new committees, active faults,
-asynchrony or the deployment's actual synchrony bound, cross-epoch mobile
-corruption, verifiable same-secret transfer and crash recovery. Until a
-maintained implementation of that exact construction passes review, Candidate
-C is an architecture target, not working cryptography.
+The largest hidden assumption would be to write "use DPSS" as if it were one
+interchangeable primitive. It is not. The implementation now names and uses
+ZF FROST RTS plus full-roster refresh-DKG for its exact one-for-one replacement
+profile. The provider APIs compile and the repository exercises them across
+unit, simulator, and live-network tests. That is working prototype
+cryptography, but the production claim still depends on an external review of
+the exact construction, fault bounds, transcripts, crash behavior, and mobile
+corruption model.
 
 The second large assumption is secure erasure. Refresh prevents historical
 accumulation only for honest parties that actually delete old shares and
@@ -1549,7 +1536,7 @@ If an adversary ever retains k shares from one epoch, that epoch's DEK is
 compromised forever. Rotation of the same DEK does not heal it. If the
 adversary remains below the DPSS corruption bound in each epoch and honest
 parties erase, shares collected in different epochs are useless together. This
-is the precise proactive claim—nothing stronger.
+is the precise proactive claim-nothing stronger.
 
 ## 9.3 Can a partition or half-completed transition destroy recovery?
 
@@ -1605,11 +1592,12 @@ than hidden behind the adapter.
 
 ## 9.6 Is this actually better than asking the owner to rebuild?
 
-Yes, but only after the implementation gate is satisfied. Routine healthy-set
-maintenance can then refresh shares without plaintext, without DEK at one
-participant, without a new Recovery Card and without an online owner. It also
-adds proactive protection that an exact-share copy lacks. The price is much
-greater protocol, metadata and availability complexity.
+For the implemented prototype, yes. Routine healthy-set maintenance refreshes
+shares without plaintext, without DEK at one participant, without a new
+Recovery Card, and without an online owner. It also adds proactive protection
+that an exact-share copy lacks. Production use remains gated on external review
+of the FROST integration. The price is greater protocol, metadata, and
+availability complexity.
 
 The owner rebuild remains better in rare cases where the DPSS handoff quorum
 is gone, a new DEK is required, v2 must be migrated, or the DPSS provider does
@@ -1620,18 +1608,20 @@ would be the dangerous simplification this design is intended to avoid.
 
 ## 9.7 Revision outcome
 
-This self-critique produced four hard gates already incorporated above:
+The review established four gates that are incorporated above:
 
-1. no DPSS implementation without a named, reviewed, maintained provider;
+1. use a named, maintained provider, with external review of this integration
+   still required for production;
 2. fresh witness reads by signers prevent new stale-epoch Begin certificates;
 3. third-party sampled audits explicitly disclose sampled encrypted custody
    bytes and must be isolated per slot or omitted;
 4. v2 migration and no-quorum fallback are explicitly owner-controlled and
    recovery-equivalent.
 
-With those limits, Staged Verifiable Guardian Epochs remains the strongest
-defensible target. Without them, Candidate B is the only currently
-implementable safe mechanism and should not be described as proactive.
+With those limits, Staged Verifiable Guardian Epochs is the implemented
+prototype design. An owner-controlled Candidate B rebuild remains the fallback
+when the distributed handoff cannot run, and must not be described as
+proactive.
 
 ---
 
@@ -1704,7 +1694,7 @@ implementable safe mechanism and should not be described as proactive.
 50. Repeated metadata: fixed schedule/cover mitigates but cannot eliminate it.
 51. Incentives: rotation failures alone are not automatically attributable.
 52. Slashable evidence: only signed, independently verifiable equivocation,
-    invalid proofs/bytes, or signed loss admissions—not timeouts.
+    invalid proofs/bytes, or signed loss admissions-not timeouts.
 
 ---
 
@@ -1757,8 +1747,10 @@ Dependency reconnaissance on 2026-08-14:
 - PoR crates found during search were not adopted; adding a SNARK/pairing PoR
   merely for health checks would expand assumptions and PQ/metadata surface.
 
-These findings justify the implementation gate. A research paper plus field
-primitives is not a maintained production DPSS implementation.
+These findings ruled out assembling a protocol from research papers and field
+primitives. The later provider selection supplies maintained RTS and refresh
+APIs, but does not remove the production requirement for an external review of
+their use here.
 
 ## Final non-claims
 

@@ -1,4 +1,18 @@
-# Metadata Resistance
+# Metadata resistance
+
+The simulator and live runtime make different claims:
+
+| Environment | What is implemented |
+|---|---|
+| Simulator OFF | direct messages with protocol metadata visible for debugging |
+| Simulator BASIC | opaque handles and reduced outer metadata |
+| Simulator STRONG | fixed-size bucketed cells, epochs, cover traffic, dummy traffic, rotating mailbox ids, and multi-hop routes |
+| Live network | a direct single-hop relay with end-to-end sealed payloads |
+
+STRONG is a simulator model, not a deployed anonymity network. The live relay
+can observe timing, endpoints, mailbox activity, and traffic volume even when
+it cannot open endpoint payloads. Neither environment supports a claim of
+perfect or information-theoretic anonymity.
 
 ## Guardian rotation
 
@@ -30,7 +44,7 @@ Reduce the ability of a passive global observer or curious individual protocol p
 
 The prototype does not attempt perfect size hiding or production-grade anonymous retrieval.
 
-## 1. Metadata That Must Never Be Publicly Mapped
+## 1. Metadata that must never be publicly mapped
 
 Do not create public mappings for:
 
@@ -69,7 +83,7 @@ It must not contain:
 - plaintext secret,
 - owner real-world identity.
 
-## 3. Outer Transport Rules
+## 3. Outer transport rules
 
 Wherever possible, keep these values inside end-to-end encrypted payloads rather than outer headers:
 
@@ -84,7 +98,7 @@ Outer routing should use only the opaque mailbox/routing material necessary for 
 Opaque mailbox handles are random values and must not encode actor role,
 guardian/signer index, config id, or another stable protocol identifier.
 
-## 4. Metadata Modes
+## 4. Metadata modes
 
 ### OFF
 
@@ -120,7 +134,7 @@ BASIC plus:
 
 The simulator should maintain cover traffic among all visible participant classes so the presence of a packet alone is not equivalent to "a recovery is happening".
 
-## 5. Strong-Mode Simulator Rule
+## 5. STRONG simulator rule
 
 The simulation kernel may know whether a packet is real or dummy for animation and scoring.
 
@@ -135,7 +149,7 @@ The passive observer receives only the metadata visible on the observed link:
 
 Real/dummy classification must not be passed directly to the observer.
 
-## 6. Unavoidable Leakage
+## 6. Unavoidable leakage
 
 Be explicit:
 
@@ -155,7 +169,7 @@ A single guardian should not learn the full guardian roster or owner identity.
 
 A threshold of signers can reconstruct A and therefore can decrypt the Recovery Descriptor. That is part of the signer-threshold trust assumption.
 
-## 7. Claims Allowed in the Demo
+## 7. Claims allowed in the demo
 
 Good:
 
@@ -177,7 +191,7 @@ Bad:
 
 > Perfect anonymity.
 
-## 8. GUI Requirements
+## 8. GUI requirements
 
 The observer panel should compare OFF/BASIC/STRONG modes and show:
 

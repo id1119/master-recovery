@@ -1,6 +1,15 @@
-# Protocol Specification
+# Protocol specification
 
-## Protocol v3 Guardian Epoch amendment
+This file has two layers. The numbered setup and recovery sections define the
+immutable protocol-v2 flow. The opening amendment defines what protocol v3
+changes: epoch-bound FROST `DEK` shares, witness-selected successor epochs, and
+guardian rotation. It does not silently reinterpret v2 objects.
+
+Read [`HOW_IT_WORKS.md`](HOW_IT_WORKS.md) for a concrete walkthrough,
+[`GUARDIAN_ROTATION.md`](GUARDIAN_ROTATION.md) for the complete v3 amendment,
+and [`SECURITY.md`](SECURITY.md) for trust assumptions and limits.
+
+## Protocol v3 guardian-epoch amendment
 
 Protocol v2 below remains immutable and recovery-only. Protocol v3 adds the
 authoritative Guardian Rotation design from `GUARDIAN_ROTATION.md`:
@@ -18,7 +27,7 @@ authoritative Guardian Rotation design from `GUARDIAN_ROTATION.md`:
   library's refresh-DKG; the coordinator receives provider messages and
   ciphertext C, never a plaintext DEK share or DEK;
 - at least k committed old fragments reconstruct ciphertext C, which is
-  Reed–Solomon re-encoded and stored in fresh epoch AEAD envelopes; every
+  Reed-Solomon re-encoded and stored in fresh epoch AEAD envelopes; every
   contributing fragment carries its complete committed record leaf and a
   proof against the predecessor material root. The setup capsule separately
   commits to the deterministic raw fragment set, and every successor verifies
@@ -52,7 +61,7 @@ Every v3 recovery request binds the exact `ConfigRef`. Epoch labels are
 validated before FROST interpolation; share and fragment AEAD contexts bind
 the full reference and actor/fragment indices.
 
-## 1. Core Objects
+## 1. Core objects
 
 For each protected secret:
 
@@ -69,7 +78,7 @@ The plaintext secret is encrypted with DEK before any erasure coding.
 
 ## 2. Setup
 
-### 2.1 Create Configuration
+### 2.1 Create configuration
 
 Generate:
 
@@ -83,7 +92,7 @@ Generate:
 - thresholds,
 - minimum recovery delay.
 
-### 2.2 Split A to Signers
+### 2.2 Split A among signers
 
 ```text
 A -> Shamir(s-of-m) -> A_share_i
@@ -93,13 +102,13 @@ Signer i receives exactly one A share plus its private signer state.
 
 Signer keys are independently generated.
 
-### 2.3 Encrypt the Secret
+### 2.3 Encrypt the protected secret
 
 ```text
 C = XChaCha20Poly1305_Encrypt(DEK, secret, payload_context)
 ```
 
-### 2.4 Erasure-Code the Ciphertext
+### 2.4 Erasure-code the ciphertext
 
 ```text
 C -> Reed-Solomon(k-of-n) -> F_i
@@ -113,7 +122,7 @@ Any k valid fragments reconstruct C.
 DEK -> Shamir(k-of-n) -> D_i
 ```
 
-### 2.6 Encrypt Each Guardian DEK Share Under A
+### 2.6 Encrypt each guardian DEK share under A
 
 For guardian i:
 
@@ -128,7 +137,7 @@ E_i = XChaCha20Poly1305_Encrypt(K_i, D_i, guardian_share_context)
 
 Guardian i never stores plaintext `D_i`.
 
-### 2.7 Commit Guardian Material
+### 2.7 Commit guardian material
 
 For each i:
 
@@ -223,19 +232,19 @@ does not move stable protocol identifiers into outer headers.
 
 ## 3. Recovery
 
-### 3.1 Fresh Device
+### 3.1 Fresh device
 
 The recovery client starts with blank secret state and scans the Recovery Card.
 
 It retrieves the Config Capsule.
 
-### 3.2 Fresh Recovery Recipient
+### 3.2 Fresh recovery recipient
 
 Generate a new one-time KEM recovery-recipient keypair.
 
 The decapsulation key remains only on the recovery device.
 
-### 3.3 Recovery Request
+### 3.3 Recovery request
 
 Create a unique RecoveryRequest bound to:
 
@@ -248,7 +257,7 @@ Create a unique RecoveryRequest bound to:
 - nonce,
 - expiry.
 
-### 3.4 Signer Approval
+### 3.4 Signer approval
 
 Each signer independently performs the external/social identity check.
 
@@ -270,7 +279,7 @@ A_share_1 ... A_share_s -> A
 
 The recovery client decrypts the Recovery Descriptor and learns the guardian routing/slot information.
 
-### 3.6 Begin Recovery
+### 3.6 Begin recovery
 
 The recovery client sends the threshold-valid signer approvals to selected guardians as a BeginRecoveryCertificate through the metadata-resistant transport.
 
@@ -282,7 +291,7 @@ Before `not_before`, an honest guardian does not release its contribution.
 
 No drand timelock is used.
 
-### 3.8 Owner Hard Cancellation
+### 3.8 Owner hard cancellation
 
 Only the independent per-config owner cancellation private key can cancel a
 recovery. Signers have no cancellation authority.
@@ -314,7 +323,7 @@ The owner cancellation key can only deny recovery. It cannot authorize Begin or
 Release, open the Recovery Descriptor, reconstruct A or DEK, or decrypt payload
 material.
 
-### 3.9 Release Certificate
+### 3.9 ReleaseCertificate
 
 After the delay window, the recovery client obtains the configured signer threshold of fresh release votes bound to the same immutable RecoveryRequest.
 
@@ -335,7 +344,7 @@ A guardian releases only if:
 
 On ambiguous or partitioned state, the guardian fails closed.
 
-### 3.10 Guardian Contribution
+### 3.10 Guardian contribution
 
 Guardian i returns the exact committed:
 
@@ -349,7 +358,7 @@ all encrypted to the approved recovery recipient.
 The signed contribution includes the same canonical request digest, so its
 request id cannot be rebound to another recipient or transcript.
 
-### 3.11 Final Reconstruction
+### 3.11 Final reconstruction
 
 The recovery client:
 

@@ -1,235 +1,305 @@
 # Master Recovery
 
-A working hackathon prototype of metadata-resistant, post-quantum-skewed,
-decentralized secret recovery.
+Master Recovery is an experimental protocol for recovering a critical secret
+without giving one person, company, or backup key sole control of recovery.
 
-Protocol v3 also implements staged Guardian Epoch rotation. Replacement
-guardians are introduced with the maintained Zcash Foundation FROST
-Ristretto255 repairable-sharing API, then the full successor committee runs a
-refresh-DKG. All successor records are durably prepared before a card-pinned
-witness QC activates them; the old epoch remains recoverable until cutover and
-drains already-begun requests afterward. See `GUARDIAN_ROTATION.md` for the
-authoritative design and explicit classical/audit/secure-erasure limits.
+The project targets self-custody wallets, wallet infrastructure, institutional
+signing keys, and other high-value secrets that may need to remain recoverable
+for years. It is a protocol layer, not a wallet, hardware device, password
+manager, or production custody service.
 
-The implementation follows `MASTER_PROMPT.md`: an authorization key `A` is
-Shamir-shared to signers, the payload is encrypted with a separate `DEK`, and
-guardians receive Reed–Solomon ciphertext fragments plus DEK shares encrypted
-under per-guardian keys derived from `A`. Recovery requires both thresholds,
-the Begin → Delay → Release state machine, and a fresh recovery-recipient key.
+## Why
 
-The approved transport correction uses X-Wing (X25519 + ML-KEM-768) through
-the maintained RustCrypto implementation. Ed25519 authorization and guardian
-signatures remain classical, so the complete protocol is not fully
-post-quantum. The X-Wing crate also states that its implementation has not been
-independently audited; this repository is a hackathon prototype, not a
-production cryptographic product.
+A normal encrypted backup still needs a recovery key. If one person or service
+holds that key, recovery has a single point of failure and a single point of
+compromise. Copying the plaintext to several places only creates more targets.
+
+Master Recovery separates authorization from custody:
+
+- signers decide whether a specific recovery request may proceed;
+- guardians store encrypted DEK shares and fragments of the encrypted payload;
+- a fresh recovery device combines both thresholds after a delay.
+
+Neither group has the complete recovery path by itself. Plaintext
+reconstruction happens only on the recovery device.
+
+## How recovery works
+
+```text
+Owner protects a secret
+          |
+          v
+  Encrypted recovery configuration
+      /                       \
+ Signers                    Guardians
+ authorize an exact         hold encrypted shares
+ recovery device            and ciphertext fragments
+      \                       /
+       signer threshold + delay
+          + guardian threshold
+                    |
+                    v
+       Fresh device reconstructs locally
+```
+
+At setup, the client creates an authorization key called `A` and a separate
+data-encryption key called `DEK`. Signers receive threshold shares of `A`. The
+payload is encrypted with `DEK`, then guardians receive encrypted DEK shares
+and Reed-Solomon fragments of the ciphertext.
+
+A new device creates a one-time recovery recipient key and an exact recovery
+request. A signer threshold approves that request and sends its `A` shares only
+to that device. The device reconstructs `A`, opens the private Recovery
+Descriptor, and learns how to contact the guardians. Guardians start a local
+delay when they accept the Begin certificate. After the delay, a fresh signer
+threshold authorizes Release. A guardian threshold then returns the committed
+material to the same recovery recipient. The device verifies it, reconstructs
+`DEK` and the ciphertext, and decrypts the secret locally.
+
+The owner can permanently cancel the exact request during the delay. This uses
+a separate private cancellation key created at setup. Cancellation cannot
+authorize recovery or decrypt anything.
+
+See [HOW_IT_WORKS.md](HOW_IT_WORKS.md) for a concrete 2-of-3 signer,
+5-of-8 guardian example.
+
+## Actors
+
+| Actor | Role | What it knows | What it cannot do alone |
+|---|---|---|---|
+| Owner | Creates the configuration and keeps cancellation control | The original secret, Recovery Card, and private owner-control file | Use the cancellation key as a recovery credential; cancellation does not decrypt the secret |
+| Recovery client | Runs one exact recovery on a fresh device | The reconstructed secret after success | Skip signer approval, guardian delay, or guardian threshold |
+| Signer | Performs an external identity check and contributes one `A` share | That it approved a pseudonymous request; its own share | Read guardian material or recover the payload alone |
+| Guardian | Enforces delay and stores one encrypted DEK share plus one ciphertext fragment | Its own opaque record and requests for that record | Learn the owner, open its DEK share without `A`, or reconstruct the payload alone |
+| Relay | Routes sealed messages through opaque mailboxes | Adjacent endpoints, timing, volume, and mailbox handles | Read protocol payloads or alter them without detection |
+| Config store | Publishes a pseudonymous Config Capsule for protocol v2 | Public capsule fields and access timing | Read the private guardian roster or any recovery key |
+| Witness | Tracks the active protocol-v3 guardian epoch | Capsule hashes, epoch order, and rotation timing | Read the guardian roster, shares, DEK, or plaintext |
+
+## The Recovery Card
+
+The Recovery Card is a locator, not a recovery key. A new device uses it to
+find the public Config Capsule, signers, relays, and the witness set used by
+protocol v3.
+
+It contains no `A` share, DEK share, decryption key, plaintext, or guardian
+roster. Possession of the card lets someone start contacting the recovery
+system and reveals privacy-sensitive infrastructure metadata. It does not let
+them complete recovery without the required approvals and guardian material.
+
+The private `owner-control` file is different. It contains the per-config
+cancellation private key and private operational data. Keep it secret. The
+network setup commands write it with mode `0600`.
+
+## Main properties
+
+- Threshold authorization: the configured signer threshold must approve the
+  exact request and fresh recipient.
+- Threshold custody: the recovery client needs enough valid guardian records.
+- Delayed release: guardians enforce Begin, a local monotonic delay, then
+  Release.
+- Owner hard cancellation: the setup-time owner key can permanently kill one
+  exact request before material is released.
+- Local reconstruction: network nodes do not reconstruct the plaintext.
+- Integrity and replay checks: signed canonical transcripts, AEAD contexts,
+  Merkle proofs, request identifiers, nonces, configuration references, and
+  actor indices bind the flow.
+- Guardian rotation: protocol v3 can replace a guardian and refresh the active
+  DEK sharing without decrypting the payload.
+- Conservative metadata goals: the public configuration does not expose the
+  owner-to-guardian map. Stronger traffic-hiding behavior remains simulated.
+
+## Guardian rotation
+
+Guardians cannot be expected to stay online or trustworthy for the lifetime of
+a recovery configuration. Protocol v3 organizes guardian custody into epochs.
+A one-for-one replacement looks like this:
+
+```text
+Epoch 1: G1 G2 G3 G4 G5 G6 G7 G8
+                         G4 leaves
+Epoch 2: G1 G2 G3 G9 G5 G6 G7 G8
+```
+
+The old threshold uses the maintained Zcash Foundation FROST implementation to
+repair the replacement participant, then the complete successor roster runs a
+share refresh. The encrypted payload and `DEK` remain the same. The shares,
+wrapping contexts, records, routes, and guardian epoch change.
+
+Every successor verifies its new share and ciphertext fragment, stores its
+record as `PREPARED`, and signs the exact material root. Signers and a pinned
+witness quorum activate the new epoch only after every successor is ready. The
+old epoch stays active until that cutover and drains requests that began before
+activation.
+
+Shares from different epochs are not accepted as one recovery set. Recovery
+uses the witness-selected `ConfigRef`, and the wrapper rejects mixed epoch
+labels before FROST reconstruction. Rotation still depends on secure erasure
+and the stated per-epoch corruption bound; it cannot undo a DEK or plaintext
+that an attacker already learned.
+
+The full design and limits are in
+[GUARDIAN_ROTATION.md](GUARDIAN_ROTATION.md).
+
+## Cryptography
+
+| Primitive | Use in the protocol |
+|---|---|
+| `blahaj` Shamir secret sharing | v2 `A` and `DEK` sharing; v3 `A` sharing |
+| ZF `frost-ristretto255` | v3 DEK dealer sharing, guardian replacement, refresh, and recovery |
+| XChaCha20-Poly1305 | Encrypts the payload, DEK shares, and private protocol state |
+| Reed-Solomon | Splits encrypted payload bytes for guardian availability |
+| SHA-256, HKDF, and Merkle commitments | Key separation, transcript digests, and integrity proofs |
+| X-Wing (X25519 + ML-KEM-768) | Establishes recipient encryption keys for protocol messages |
+| Ed25519 | Signs signer, guardian, owner, and witness transcripts |
+
+The protocol is not fully post-quantum. X-Wing gives the transport a hybrid
+classical and ML-KEM profile, but Ed25519 and Ristretto255 FROST remain
+classical. The exact FROST rotation integration has not received an external
+cryptographic audit.
+
+## What exists today
+
+### Implemented
+
+- real encryption, sharing, signatures, commitments, erasure coding, and local
+  reconstruction;
+- deterministic recovery and rotation state machines shared by the simulator
+  and network runtime;
+- protocol-v2 setup, recovery, hard cancellation, relay and config-store
+  failover, and full post-recovery configuration replacement;
+- protocol-v3 setup, witness discovery, recovery, owner rotation
+  cancellation, failed-guardian replacement, full-roster share refresh,
+  atomic activation, draining, and repeated rotation;
+- independent persistent signer, guardian, relay, config-store, and witness
+  processes in the network demos;
+- adversarial tests for corruption, replay, stale epochs, mixed shares,
+  cancellation races, actor outages, persistence, and rollback.
+
+### Simulated
+
+The OFF, BASIC, and STRONG metadata modes live in `gp-sim`:
+
+- OFF is direct encrypted transport with no anonymity claim.
+- BASIC adds opaque mailboxes, randomized forwarding delay, and simulated
+  multi-hop routes.
+- STRONG adds fixed-size or bucketed cells, epochs, cover traffic, dummy
+  requests and responses, rotating handles, and identical real/dummy outer
+  formats.
+
+The real network relay is a direct forwarding hop. It is not the STRONG
+simulated mixnet. Timing, traffic volume, endpoints, and approximate message
+sizes remain visible in the live runtime.
+
+### Not production ready
+
+This is a research and hackathon prototype. It has not received a professional
+security audit. The Docker demo uses automatic signer approval and a short
+delay. Node JSON state is not encrypted at rest, the coordinator is not a
+replicated resumable service, and the live relay is not an anonymity network.
+
+Read [SECURITY.md](SECURITY.md) before evaluating or deploying any part of the
+system.
 
 ## Quick start
 
 Rust 1.97 or later is recommended.
 
+Run the test suite and deterministic simulator:
+
 ```sh
 make test
 make demo
-cargo run -p gp-cli -- rotate --delay-seconds 1
-make network-v3-smoke
 ```
 
-Launch the visual simulator:
+Run the visual simulator, then open <http://127.0.0.1:8787>:
 
 ```sh
 make gui
 ```
 
-Then open <http://127.0.0.1:8787>.
+Run the live protocol-v3 smoke test with separate local processes:
 
-Run the real multi-process Docker network:
+```sh
+make network-v3-smoke
+```
+
+Run the protocol-v2 Docker network and recovery demo:
 
 ```sh
 make network-demo
 ```
 
-This starts three redundant relays, three mirrored config stores, three
-signers, and eight guardians as independent persistent containers, provisions
-them over encrypted network messages, waits on guardian-local monotonic
-delays, rejects an intentionally corrupt guardian, and reconstructs plaintext
-only in the recovery client. Every mailbox route is registered on every relay
-and the Config Capsule is mirrored to every config store, so the client
-fails over when any relay or store is stopped. See
-[`NETWORK_GUIDE.md`](NETWORK_GUIDE.md) for the complete communication model,
-VM commands, APIs, failure demos, and security limitations.
+The Docker command starts redundant relays and config stores, three signers,
+and eight guardians. It needs Docker Compose. See
+[NETWORK_GUIDE.md](NETWORK_GUIDE.md) for manual VM commands, APIs, failure
+tests, and the full network model.
 
-Run `make network-dashboard` for a read-only node/uptime view on
-<http://127.0.0.1:8788>. It is bound to localhost and exposes container health,
-not protocol state or secret material.
-
-Network setup also writes `demo-data/owner-control.json` with mode `0600`.
-That private per-config artifact is the only cancellation authority. It is
-separate from the non-confidential Recovery Card and must not be published.
-
-The owner-side offline format for backing up this material (owner-control +
-Recovery Card, sealed, error-corrected, verifiable) is designed in
-[`ENVELOPE_SPEC.md`](ENVELOPE_SPEC.md). It is a design draft, not implemented;
-it extends, never changes, the protocol below.
-
-Owner hard cancellation is protocol v2. Node state files are namespaced by
-protocol version, so existing v1 Docker volumes are left intact but ignored.
-Run `make network-demo` once to provision a fresh v2 Recovery Card and private
-owner-control file. Earlier owner-cancel v2 Cards with one locator remain
-readable and simply operate without replica failover.
-
-The live protocol-v3 path is available directly from `gp-network`:
+Useful simulator commands:
 
 ```sh
-gp-network setup-v3 ...
-gp-network rotate-v3 --card card-v3.json --owner-control owner-v3.json \
-  --remove-guardian 4 --replacement-guardian http://new-guardian:8080 \
-  --rotation-control rotation-v3.json ...
-gp-network cancel-rotation-v3 --rotation-control rotation-v3.json \
-  --owner-control owner-v3.json
-gp-network discover-v3 --card card-v3.json
-gp-network recover-v3 --card card-v3.json
-```
-
-`make network-v3-smoke` starts separate TCP processes, provisions a v3 epoch,
-recovers it, takes the first guardian and one of four witnesses offline,
-owner-cancels one in-flight rotation and successfully retries it, performs two
-successive RTS + full-roster refresh rotations with the remaining 2f+1 witness
-quorum, uses the unchanged Recovery Card to discover epoch 3, and recovers the
-exact original payload again. The coordinator reports zero payload
-decryptions. Both the v3 owner-control and per-rotation control files are
-private: together they contain the cancellation authority and private roster.
-
-For a non-code explanation, presentation script, terminology guide, and twenty
-adversarial defense questions with answers, read
-[`HUMAN_GUIDE_AND_DEFENSE.md`](HUMAN_GUIDE_AND_DEFENSE.md).
-
-The browser uses a compact three-stage flow: create an encrypted backup, save
-the generated Recovery Card, then test recovery on a fresh-client view. The
-verified protocol trace can be played automatically or stepped backward and
-forward one event at a time. The Recovery Card can be copied or downloaded as
-JSON; it contains config locators, relay bases and opaque signer mailboxes,
-never the guardian roster or a decryption key.
-
-The backup card accepts either text or a file up to 700 KiB. Safe defaults keep
-the first screen short. **Customize plan and test conditions** exposes every
-simulator control from the design: the three scenarios, signer/guardian counts
-and thresholds, owner hard cancellation, offline/corrupt actors, delay,
-metadata mode, latency, loss, duplication, mix drops, cover traffic, replay
-seed, and same-seed mode comparison. Impossible combinations are rejected with
-a specific explanation before protocol execution. File plaintext is shown or
-downloaded only in the final recovery-client panel.
-
-Useful direct commands:
-
-```sh
-# Complete deterministic recovery with a corrupted guardian
+# Complete deterministic recovery with a corrupt guardian
 cargo run -p gp-cli -- demo --seed 424242 --mode strong
 
-# One corrupted and one offline guardian; replacement still succeeds
+# Replace offline or malicious guardians during recovery
 cargo run -p gp-cli -- demo --corrupt-guardian 1 --offline-guardian 2
 
-# Setup-time owner-key hard cancellation immediately before release
+# Exercise setup-time owner cancellation
 cargo run -p gp-cli -- cancel --seed 424242
 
-# Compare observer views using the same protocol seed
-cargo run -p gp-cli -- compare --seed 424242
-
-# Machine-readable replay
-cargo run -p gp-cli -- demo --json
+# Run four protocol-v3 guardian rotations in the deterministic simulator
+cargo run -p gp-cli -- rotate --seed 424242
 ```
 
-Use `0` for a guardian/signer option to disable that adversarial toggle.
-
-## What is real
-
-- XChaCha20-Poly1305 payload encryption and guardian-share wrapping.
-- Maintained `blahaj` Shamir secret sharing for v2 `A`/`DEK` and v3 `A`; the vulnerable,
-  unpatched `sharks` dependency is not used. The wrapper enforces the protocol's
-  32-byte key/share profile, rejects malformed or duplicate shares before
-  reconstruction, and keeps share buffers zeroizing. See
-  [`SHAMIR_AUDIT.md`](SHAMIR_AUDIT.md) for the historical compatibility matrix,
-  test evidence, benchmarks, and exact non-claims.
-- Maintained Zcash Foundation `frost-ristretto255` 3.x dealer sharing, RTS
-  replacement, and full-successor refresh-DKG for the v3 DEK. No field,
-  polynomial, repair, or combiner math is implemented locally.
-- Reed–Solomon erasure coding over encrypted payload bytes.
-- SHA-256 commitments and Merkle membership proofs.
-- A capsule-bound Merkle commitment to the deterministic raw ciphertext
-  fragments; successors reject corrupt or index-substituted rotation material
-  before preparation.
-- Canonical length-prefixed signature transcripts with domain separation.
-- Ed25519 signer and guardian signatures.
-- X-Wing recipient encryption bound to request-specific AEAD context.
-- Exact config version, request id, recipient, nonce, actor index, and request
-  digest binding.
-- Deterministic recovery and guardian state machines.
-- The same serialized `gp-core::RotationMachine` drives live guardian actors
-  and the simulator; secret provider journals are node-locally encrypted.
-- Live v3 setup, witness discovery, signer-authorized rotation, sealed direct
-  DPSS rounds, atomic activation, repeated rotation, and final recovery.
-- Successor guardians retain their wrapped DEK shares and complete records
-  locally during rotation; the A-holding coordinator sees only commitment
-  leaves and therefore cannot unwrap a threshold from its own transcript.
-- Owner-only hard cancellation using a per-config private key created at setup.
-- Signer-side request-id/nonce replay protection and guardian cancellation
-  tombstones that survive Begin/cancel message reordering.
-- Independently verifiable signer Merkle membership in Begin and Release, plus
-  owner cancellation signatures checked against each guardian's pinned key.
-- Malicious/offline guardian replacement and final client-only reconstruction.
-- Successful-recovery rotation to fresh version-2 keys, shares, fragments,
-  commitments, and opaque slots.
-
-## What is simulated
-
-The anonymity transport is a deterministic visualization, not a deployed
-mixnet. The simulator provides:
-
-- OFF: direct encrypted transport baseline.
-- BASIC: opaque mailboxes, randomized delay, and multi-hop routes.
-- STRONG: fixed-size cells, epochs, rotating mailbox tags, multi-hop routes,
-  dummy requests and responses, and continuous configured-rate cover traffic.
-
-In STRONG mode, real and dummy packets have the same observer-visible outer
-format. The simulation kernel retains the real/dummy bit for scoring, but the
-observer packet object does not contain it. Timing, traffic volume, adjacent
-hops, size buckets, and endpoint participation can still leak.
-
-The GUI exposes thresholds, compressed delay, latency, loss, duplication, mix
-drops, cover rate, actor failures, corruption, metadata mode, and replay seed.
-
-## Workspace
+## Repository map
 
 ```text
-gp-types       protocol data only
-gp-crypto      sole direct user of cryptographic libraries
-gp-wire        canonical transcripts and contexts
-gp-core        deterministic I/O-free state machines
-gp-storage     in-memory signer/guardian/config stores
-gp-transport   direct and metadata-mode adapters
-gp-sim         seeded end-to-end protocol orchestration
-gp-ipc         versioned CLI/browser command boundary
-gp-gui-sim     local browser gateway and visual lab
-gp-cli         demo, cancellation, comparison, and server commands
-gp-network     real HTTP nodes, Docker network, setup and recovery clients
+gp-types       protocol data, no crypto or I/O
+gp-wire        canonical transcripts, contexts, and framing
+gp-crypto      the only crate that calls cryptographic libraries directly
+gp-core        deterministic, I/O-free protocol state machines
+gp-storage     durable signer, guardian, witness, and replay state models
+gp-transport   direct and simulated metadata transport adapters
+gp-sim         seeded end-to-end recovery and rotation scenarios
+gp-network     real multi-process actors and clients
+gp-ipc         versioned CLI and browser command boundary
+gp-gui-sim     local browser gateway and visual simulator
+gp-cli         simulator and demo commands
 ```
 
-`gp-core` performs no filesystem, socket, environment, system-clock, or OS-RNG
-access. Time and certificate validity are injected, and the same core machines
-drive every simulator scenario.
+`gp-core` reads no filesystem, socket, environment variable, wall clock, or OS
+randomness. Callers inject time, entropy, storage outcomes, and network events.
+The simulator and real runtime therefore exercise the same state transitions.
 
-## Security boundaries
+## Documentation
 
-The Recovery Card is non-confidential but privacy-sensitive. It contains
-config locators, relay bases and opaque signer mailboxes, but no secret key
-material or guardian roster. The roster exists only in the Recovery Descriptor
-sealed under `A`.
+Suggested reading order:
 
-A compromised signer threshold can authorize a malicious recovery. The delay
-and owner hard-cancel path provide a reaction window while the original owner
-retains its per-config cancellation key; they do not make that
-compromise harmless. Guardians enforce the delay as policy using an injected
-monotonic clock—it is not a trust-free cryptographic timelock.
+1. [HOW_IT_WORKS.md](HOW_IT_WORKS.md): one recovery and rotation example in
+   plain technical English.
+2. [PROTOCOL.md](PROTOCOL.md): exact setup, request, delay, release, and
+   reconstruction flow.
+3. [SECURITY.md](SECURITY.md): trust assumptions and failure boundaries.
+4. [GUARDIAN_ROTATION.md](GUARDIAN_ROTATION.md): authoritative protocol-v3
+   rotation design and implementation evidence.
 
-Do not claim perfect anonymity, full size hiding, unconditional availability,
-or full post-quantum security.
+Other references:
+
+- [ARCHITECTURE.md](ARCHITECTURE.md): crate boundaries and data flow.
+- [SHAMIR_AUDIT.md](SHAMIR_AUDIT.md): threshold-sharing choices, tests, and
+  benchmarks.
+- [METADATA_RESISTANCE.md](METADATA_RESISTANCE.md): privacy goals and remaining
+  leakage.
+- [NETWORK_GUIDE.md](NETWORK_GUIDE.md): live topology, commands, APIs, and
+  persistence behavior.
+- [MASTER_PROMPT.md](MASTER_PROMPT.md): authoritative project requirements.
+- [ENVELOPE_SPEC.md](ENVELOPE_SPEC.md): an unimplemented owner-side backup
+  envelope design.
+- [HUMAN_GUIDE_AND_DEFENSE.md](HUMAN_GUIDE_AND_DEFENSE.md): Serbian demo and
+  project-defense notes.
+
+## Security status
+
+Master Recovery is experimental, unaudited, and not production ready. The
+protocol has explicit threshold, delay, cancellation, metadata, availability,
+secure-erasure, and classical-cryptography assumptions. See
+[SECURITY.md](SECURITY.md) for the complete list.

@@ -1,10 +1,14 @@
-# Guardian Protocol Network Runtime
+# Master Recovery network runtime
 
 This document explains the real multi-process network runtime from first
 principles. It covers the actor model, Docker topology, HTTP APIs, end-to-end
 envelopes, cryptographic objects, setup, recovery, delay enforcement,
 cancellation, persistence, failure behavior, security boundaries, and the
 remaining prototype limitations.
+
+For a shorter explanation of the actors and recovery flow, start with
+[`HOW_IT_WORKS.md`](HOW_IT_WORKS.md). This guide is the operational reference
+for processes, endpoints, persistence, and demonstration commands.
 
 Protocol v3 adds a separate `witness` process role. Its `/v3/witness` APIs
 accept an admin-provisioned genesis capsule and pinned signer keys, verify
@@ -17,7 +21,7 @@ The authoritative protocol remains `MASTER_PROMPT.md`. This runtime does not
 replace the deterministic simulator; it adds an actual socket-based execution
 path for a live distributed demo.
 
-## 1. What “real network” means here
+## 1. What "real network" means here
 
 The following are real in this runtime:
 
@@ -40,7 +44,7 @@ The following are real in this runtime:
 - an intentionally corrupt guardian produces a genuinely invalid contribution
   that the client rejects using its Merkle proof;
 - a stopped container creates a real connection failure rather than a virtual
-  “offline” flag.
+  "offline" flag.
 
 The following are not production network features:
 
@@ -877,7 +881,7 @@ Important limitations:
     exists only for unattended demonstration.
 11. Release votes do not contain an independently verifiable guardian-delay
     timestamp. Guardians still enforce their own delay and cancellation state,
-    but “fresh after delay” signer behavior depends on honest signer policy.
+    but "fresh after delay" signer behavior depends on honest signer policy.
 12. The live v3 coordinator is an ephemeral CLI, not a replicated durable job
     service. Actor crash state is durable and old ACTIVE custody is preserved,
     but automatic coordinator resume after every possible crash point remains

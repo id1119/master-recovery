@@ -1,222 +1,85 @@
-# Rust Architecture
+# Architecture
 
-## Protocol-v3 rotation implementation
-
-- `gp-types::rotation` defines ConfigRef, private plans, every
-  vote/certificate/ack, public capsule/card, guardian records, witness reads
-  and custody samples without cryptography or I/O.
-- `gp-wire::rotation` manually constructs domain-separated, length-prefixed
-  transcripts; it rejects duplicate actor ids, inconsistent nested quorum
-  material and oversized inputs. No Rust serialization is signed.
-- `gp-crypto::rotation` is a thin adapter over maintained ZF FROST
-  Ristretto255 RTS and refresh-DKG. It also supplies full-epoch HKDF/AEAD
-  separation and ciphertext-only fragment repair. `gp-crypto` additionally
-  supplies the stable raw-fragment Merkle commitment and sampled custody
-  checks. No field or polynomial arithmetic is local.
-- `gp-core::rotation` contains the deterministic RotationMachine,
-  EpochWitnessMachine and epoch-bound recovery/draining machine.
-- `gp-storage::rotation` models atomic ACTIVE/PREPARED/DRAINING records,
-  zeroizing DPSS journals, signer locks, witness locks and replay/cancellation
-  tombstones. Network JSON persistence uses temp-write, file fsync, rename and
-  directory fsync.
-- `gp-sim::rotation` uses those same components for repeated G4->G9,
-  G2->G10, G7->G11 and G5->G12 handoffs and adversarial aborts.
-- `gp-network` retains v2 endpoints and adds live v3 setup, signer/guardian
-  rotation and recovery mailboxes, an ephemeral rotation coordinator, fresh
-  per-epoch aliases, and a separate witness role with pinned signer
-  verification, durable one-child activation, owner-signed `2f+1` cancellation
-  vetoes, and nonce-bound reads. Provider messages are signed and X-Wing
-  sealed directly for their destination; the coordinator only relays opaque
-  provider payloads. A mode-0600 rotation-control artifact lets a separate
-  owner process cancel during Delay. Successor records remain guardian-local
-  during PREPARE; the coordinator sees
-  only their commitment leaves and returns Merkle root/path material.
-
-## Workspace
+Master Recovery keeps protocol decisions in a deterministic core and pushes
+I/O to the edges. The simulator and the network runtime therefore drive the
+same state machines instead of maintaining two versions of the protocol.
 
 ```text
-crates/
-    gp-types
-    gp-crypto
-    gp-core
-    gp-storage
-    gp-wire
-    gp-transport
-    gp-sim
-    gp-ipc
-    gp-gui-sim
-    gp-cli
-    gp-network
+                    injected events
+                          |
+                          v
+crypto adapters -->   gp-core   --> actions to persist or send
+                          ^
+                          |
+          simulator or network runtime
+
+CLI / GUI --> local IPC or runtime --> storage and transport
 ```
 
-## gp-types
+The key boundary is `gp-core`: it may decide what should happen, but it cannot
+read the clock, open a socket, inspect the environment, access a file, or draw
+random bytes. Callers inject time, entropy, storage results, and network
+events. This makes seeded runs reproducible and keeps real execution aligned
+with the tested model.
 
-Contains protocol types only.
+For a plain-language protocol walkthrough, start with
+[`HOW_IT_WORKS.md`](HOW_IT_WORKS.md). Exact messages and state transitions are
+specified in [`PROTOCOL.md`](PROTOCOL.md), with the v3 rotation amendment in
+[`GUARDIAN_ROTATION.md`](GUARDIAN_ROTATION.md).
 
-No cryptographic implementation and no I/O.
+## Workspace map
 
-## gp-crypto
+| Crate | Responsibility |
+|---|---|
+| `gp-types` | Protocol data types, with no cryptographic implementation or I/O |
+| `gp-wire` | Canonical encodings, explicit signed transcripts, framing, domain labels, and size limits |
+| `gp-crypto` | The only direct adapters to cryptographic libraries |
+| `gp-core` | Deterministic recovery, cancellation, witness, draining, and rotation state machines |
+| `gp-storage` | Durable signer, guardian, capsule, witness, replay, and cancellation state |
+| `gp-transport` | Direct transport, mailbox abstractions, and simulated metadata modes |
+| `gp-sim` | Seeded clock, virtual network, faults, cover traffic, and deterministic replay |
+| `gp-ipc` | Versioned local interface shared by clients and the simulator UI |
+| `gp-gui-sim` | Loopback-only visual simulator and observer views |
+| `gp-cli` | Local setup, recovery, rotation, cancellation, and demo commands |
+| `gp-network` | Multi-process HTTP runtime for local machines, Docker, or separate VMs |
 
-The only crate that directly depends on cryptographic primitive libraries.
+## Cryptography boundary
 
-Responsibilities:
+All direct library use belongs in `gp-crypto`. It wraps:
 
-- Shamir wrapper,
-- Reed-Solomon wrapper,
-- XChaCha20-Poly1305 wrapper,
-- HKDF/SHA-256 wrapper,
-- Ed25519 wrapper,
-- maintained X-Wing (X25519 + ML-KEM-768) transport wrapper,
-- Merkle/commitment helper,
-- zeroization helpers.
+- bounded `blahaj` threshold sharing for v2 keys and v3 authorization key `A`;
+- Zcash Foundation FROST Ristretto255 sharing, RTS replacement, and refresh-DKG
+  for the v3 `DEK`;
+- Reed-Solomon coding for ciphertext fragments;
+- XChaCha20-Poly1305, HKDF-SHA-256, Ed25519, X-Wing, commitments, and Merkle
+  proofs.
 
-Do not implement primitive math manually.
+The repository does not implement primitive arithmetic or a hybrid combiner.
+Signed material is constructed by `gp-wire` from fixed fields with explicit
+domain separation. Arbitrary Rust serialization is never signed.
 
-## gp-core
+See [`SHAMIR_AUDIT.md`](SHAMIR_AUDIT.md) for the threshold-sharing decisions
+and their limits.
 
-Deterministic state machines.
-
-Input:
+## Recovery path
 
 ```text
-Event
+fresh recovery client
+    |
+    +--> signers: reconstruct A after exact-request approval
+    |
+    +--> config store: open the Recovery Descriptor with A
+    |
+    +--> guardians: Begin -> Delay -> ReleaseCertificate
+    |
+    +--> client: verify records, reconstruct DEK and ciphertext, decrypt
 ```
 
-Output:
+The final reconstruction step exists only in the recovery client. Signers do
+not receive guardian-held material, and guardians do not receive enough signer
+material to recover on their own.
 
-```text
-State transition + Actions
-```
-
-No:
-
-- sockets,
-- filesystem,
-- wall/system clock,
-- environment access,
-- direct OS RNG.
-
-Inject:
-
-- monotonic time,
-- entropy,
-- network events,
-- storage results.
-
-The real processes and simulator must use the same core state transitions.
-
-## gp-storage
-
-Durable state for:
-
-- signer shares/state,
-- guardian records,
-- Config Capsules,
-- client config/replay state.
-
-Hackathon implementation may use simple local files/directories or another already-approved simple local store.
-
-## gp-wire
-
-Owns:
-
-- canonical message encoding,
-- explicit field ordering,
-- length-prefixed transcripts,
-- protocol domain labels,
-- framing,
-- maximum message lengths.
-
-Never sign arbitrary Rust serialization.
-
-## gp-transport
-
-Owns:
-
-- direct local/network transport,
-- mailbox abstraction,
-- multi-hop simulated transport adapter,
-- metadata-mode selection.
-
-It does not own protocol state.
-
-## gp-sim
-
-Owns:
-
-- virtual monotonic clocks,
-- virtual network,
-- deterministic seeded randomness,
-- packet latency/loss/duplication,
-- offline/malicious actor toggles,
-- OFF/BASIC/STRONG metadata modes,
-- cover traffic generation,
-- epoch batching,
-- deterministic replay.
-
-The simulator may have privileged knowledge for visualization. Protocol actors must not.
-
-## gp-ipc
-
-Versioned local IPC shared by:
-
-- CLI,
-- GUI,
-- simulator,
-- test harness.
-
-Use Unix Domain Sockets for native Unix processes if appropriate.
-
-A browser frontend must connect through a local backend/gateway rather than directly to UDS.
-
-## gp-gui-sim
-
-Visual simulator backend.
-
-The local gateway binds to loopback, accepts secrets only in same-origin POST
-bodies, disables response caching, and does not enable cross-origin reads. It
-must never accept plaintext secrets in query strings.
-
-It exposes:
-
-- actor graph,
-- packet animation,
-- recovery state,
-- observer view,
-- "who knows what" matrix,
-- deterministic replay controls.
-
-## gp-cli
-
-Commands for:
-
-- setup,
-- recovery,
-- signer approval/release and owner hard-cancel,
-- guardian simulation,
-- scripted demo,
-- deterministic replay.
-
-## gp-network
-
-Real multi-process network runtime for Docker or separate VMs.
-
-- relay, config-store, signer, and guardian HTTP servers,
-- persistent per-node state,
-- X-Wing-encrypted provisioning and mailbox envelopes,
-- actual wall-clock expiry and guardian-local monotonic delay enforcement,
-- ephemeral setup and recovery clients,
-- the same `gp-core` guardian state machine and `gp-crypto` primitives used by
-  the simulator.
-- `setup-v3`, `rotate-v3`, `discover-v3`, and `recover-v3` clients, including
-  repeated guardian replacement without a new Recovery Card.
-
-The network relay is a direct single-hop prototype, not the STRONG simulated
-mixnet. See `NETWORK_GUIDE.md` for APIs, flows, Docker topology, and limits.
-
-## State-Machine Boundary
-
-The core recovery states are:
+The required recovery states are:
 
 ```text
 Created
@@ -229,10 +92,77 @@ Completed
 Expired
 ```
 
-External actions such as network sends or disk writes are emitted by the core and executed outside it.
+Storage and network actions emitted by these transitions execute outside
+`gp-core` and return as new events.
 
-## IPC / UI Rule
+## Rotation path
 
-The UI must not manipulate protocol state directly.
+Protocol v3 adds a separate deterministic `RotationMachine`, an
+`EpochWitnessMachine`, and epoch-bound recovery and draining logic.
 
-UI action -> IPC command -> backend/core event -> state transition -> IPC update -> UI render.
+```text
+signer-approved successor plan
+    |
+    +--> old guardians: FROST RTS replacement contributions
+    +--> successor roster: full refresh-DKG
+    +--> ciphertext: reconstruct and re-encode without payload decryption
+    +--> new guardians: durable PREPARED records
+    +--> signers and witnesses: activate exactly one successor epoch
+    +--> old epoch: drain accepted requests, then retire
+```
+
+Successor Guardian Records stay on their guardians. The coordinator handles
+signed, encrypted provider messages, ciphertext fragments, commitment leaves,
+and Merkle paths, but not payload plaintext or a reconstructable set of `DEK`
+shares. It is still trusted for availability and orchestration.
+
+## Storage boundary
+
+`gp-storage` models atomic `ACTIVE`, `PREPARED`, and `DRAINING` guardian
+records, zeroizing rotation journals, signer and witness locks, and durable
+replay and cancellation tombstones. The network runtime persists JSON by
+writing a temporary file, syncing it, renaming it, and syncing the containing
+directory.
+
+The prototype's storage format and coordinator lifecycle are not production
+infrastructure. In particular, the ephemeral v3 coordinator is not a
+replicated job that automatically resumes after any process crash.
+
+## Transport and metadata boundary
+
+`gp-transport` has two distinct roles:
+
+- the simulator implements OFF, BASIC, and STRONG modes, including fixed-size
+  cells, epochs, dummy traffic, rotating mailbox identifiers, and multi-hop
+  routes;
+- the live network runtime uses a direct single-hop relay with X-Wing-sealed
+  endpoint payloads.
+
+The live relay is not a mixnet and does not provide the STRONG simulator's
+traffic-analysis resistance. The precise claims are in
+[`METADATA_RESISTANCE.md`](METADATA_RESISTANCE.md).
+
+## User-interface boundary
+
+The UI does not manipulate state directly:
+
+```text
+UI action -> IPC command -> backend event -> core transition -> IPC update -> render
+```
+
+The visual simulator binds to loopback. Secrets are accepted only in
+same-origin request bodies, response caching is disabled, and plaintext
+secrets are never placed in query strings.
+
+## Implementation status
+
+The deterministic simulator, command-line tools, visual simulator, v2 network
+flow, and v3 setup, discovery, recovery, cancellation, and repeated rotation
+flow are implemented. The network runtime is suitable for demonstrations and
+experiments, not deployment. It lacks an external cryptographic audit,
+production operations, hardened identity and transport infrastructure, and a
+real metadata-resistant network.
+
+Operational commands and topology are documented in
+[`NETWORK_GUIDE.md`](NETWORK_GUIDE.md). Security assumptions and non-claims
+are documented in [`SECURITY.md`](SECURITY.md).

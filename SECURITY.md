@@ -1,227 +1,314 @@
-# Security Model
-
-## Protocol-v3 rotation security
-
-Guardian rotation is not a recovery authority. It requires signer-threshold
-Begin -> Delay -> Release and a second signer-threshold Activate decision.
-The setup-time owner cancellation key can permanently abort the exact rotation
-before activation. The coordinator may reconstruct A to open the private
-roster and derive per-slot grants, and may reconstruct encrypted ciphertext C;
-it never receives D_i or DEK on the ordinary RTS/refresh path.
-
-A non-owner abort needs a threshold of distinct signer votes bound to the
-exact plan and pre-activation state. One compromised signer cannot force an
-abort, and predecessor plan locks are released only after signers validate the
-assembled threshold certificate. The owner path instead unlocks signers only
-after they validate the owner certificate and its witness-veto quorum, so it
-still works in the narrow race after Activate votes. Owner cancellation is
-independently complete
-after both `2f+1` authenticated witness vetoes and `n-k+1` authenticated
-old-guardian tombstone acknowledgements. The first quorum prevents activation
-or QC finalization even if Activate votes were already collected; the second
-leaves fewer than the old handoff threshold even if signer cleanup is delayed.
-The removed guardian is never an availability dependency: the old
-threshold supplies RTS material, and an available removed guardian receives a
-best-effort activation notice only to enter draining. Each old ciphertext
-fragment contribution proves its full committed record leaf against the
-predecessor material root before reconstruction.
+# Security model
 
-The public capsule also binds a stable, domain-separated Merkle root over the
-raw deterministic Reed-Solomon fragment set for the immutable payload
-generation. After reconstruction, the coordinator must reproduce that root;
-each successor verifies its exact fragment, index, shard count and proof before
-durable preparation. This prevents a coordinator from activating a successor
-set whose locally committed records contain corrupted or permuted fragments.
+Master Recovery is an unaudited research prototype. This document states the
+security goals, trust assumptions, and failure boundaries implemented by the
+current code. It is not a production security claim.
 
-Although the rotation coordinator reconstructs A and can derive each new
-guardian's wrapping key, it never receives the corresponding wrapped DEK share
-or full guardian record. Successors retain those locally and expose only a
-commitment leaf; otherwise ciphertext plus the coordinator-known wrapping key
-would be equivalent to disclosing each share and would let the coordinator
-reconstruct DEK. Each preparation acknowledgement signs the exact assembled
-material root, and signer activation rejects any Ready certificate whose root
-differs from an acknowledgement or the successor capsule.
+For the protocol sequence, read [PROTOCOL.md](PROTOCOL.md). Guardian epoch
+details are in [GUARDIAN_ROTATION.md](GUARDIAN_ROTATION.md).
 
-Atomicity is old-ACTIVE/new-PREPARED until a 2f+1 witness activation QC exists.
-Every advertised successor record is required. Witness predecessor locks and
-fresh-nonce quorum reads reject forks and rollback under the stated f bound;
-an unavailable/ambiguous quorum fails closed. A request begun on the old epoch
-keeps its original delay, expiry and cancellation path while that epoch
-drains. New old-epoch Begins are forbidden after activation.
+## Security goals
 
-Proactive security is conditional: independently refreshed epoch shares plus
-secure erasure prevent accumulation only when the attacker compromises fewer
-than the threshold within each epoch and never retains a complete threshold.
-Rotation cannot undo a previously learned DEK, plaintext or complete old
-threshold. ZF FROST and Ed25519 are classical. The selected library's later
-refresh-DKG integration needs an external review of this exact use before
-production.
+### Plaintext confinement
 
-### Dependency-audit disposition (2026-08-14)
+The plaintext should exist only on the owner client during setup and on the
+recovery client during final reconstruction. Signers, guardians, relays,
+config stores, witnesses, and the ordinary rotation coordinator should not
+receive it.
 
-`cargo audit` reports no known vulnerabilities and one allowed unmaintained
-warning, `RUSTSEC-2023-0089` for `atomic-polyfill 1.0.3`. It is present only in
-the all-target dependency graph through
-`frost-core 3.0.0 -> postcard 1.1.3 -> heapless 0.7.17`; the native dependency
-graph does not select it, because `heapless` uses it only for specific embedded
-targets. `frost-ristretto255 3.0.0` is the current published provider and its
-serialization feature is required for bounded authenticated protocol
-messages. The warning is therefore accepted for this native hackathon
-prototype, but those embedded targets are unsupported and production release
-remains gated on upgrading the provider chain or an external review-approved
-patch. This disposition is not a claim that the FROST integration itself has
-been audited.
+### Threshold authorization
 
-## 1. Security Goals
+Fewer than `s` valid signer shares must not reconstruct authorization key `A`.
+Approvals must bind to the exact configuration, request, nonce, recipient, and
+transcript.
 
-### Content Confidentiality
+### Threshold custody
 
-The plaintext secret should exist only on:
+Fewer than `k` valid guardian DEK shares must not reconstruct `DEK`. Guardian
+records also contain Reed-Solomon fragments of ciphertext, not plaintext.
 
-- the owner client during setup,
-- the recovery client during final reconstruction.
+### Separation of duties
 
-### Threshold Authorization
+Signer material alone does not contain guardian records. Guardian material
+alone does not contain `A`, which is needed to unwrap the stored DEK shares.
+No single signer, guardian, relay, config store, or witness has the complete
+recovery path.
 
-Fewer than `s` valid signer A shares must not reconstruct A.
+### Integrity, freshness, and replay resistance
 
-### Threshold Custody
+The client and nodes reject malformed shares, corrupted records, invalid
+Merkle proofs, duplicate actors, stale configuration references, replayed
+request ids, reused nonces, wrong recipients, and mismatched signed
+transcripts.
 
-Fewer than `k` valid guardian DEK shares must not reconstruct DEK.
+### Private roster
 
-### Separation
+The public Recovery Card and Config Capsule do not contain the guardian roster.
+The roster lives in the Recovery Descriptor encrypted under `A`.
 
-- guardian material alone must not be enough to decrypt the DEK shares because they are wrapped under keys derived from A,
-- signer material alone must not be enough because signers do not possess the guardian-stored encrypted DEK shares and ciphertext fragments,
-- the relay/config store must possess neither complete path.
+## Trust assumptions
 
-### Exact Recipient Binding
+The protocol assumes:
 
-Every approval and released contribution must be bound to the exact fresh recovery recipient and exact request.
+- fewer than the signer threshold are malicious when unauthorized recovery
+  must be prevented;
+- fewer than the guardian threshold expose usable custody material;
+- honest guardians enforce delay, cancellation, freshness, and exact request
+  binding;
+- the owner retains the private cancellation key if cancellation is expected
+  to remain available;
+- protocol-v3 witness faults stay within the configured `f` bound, with `3f+1`
+  pinned witnesses and `2f+1` quorums;
+- endpoint private keys and node-local secret state are protected;
+- secure erasure is effective enough for proactive guardian-epoch claims;
+- the recovery client is trustworthy at the moment it reconstructs plaintext;
+- authenticated private channels and the selected cryptographic libraries
+  behave as specified.
 
-### Replay Resistance
+An adversary that exceeds these assumptions may recover the secret, deny
+service, expose metadata, or create ambiguous state that honest nodes refuse.
 
-Old request ids, reused nonces, expired requests, and stale config versions must not be reusable by signers or guardians.
+## Compromise cases
 
-### Integrity
+### Fewer than the signer threshold
 
-Corrupted guardian material must be detected before reconstruction.
+These signers cannot reconstruct `A` or create a valid signer certificate.
+They can refuse to participate and reduce availability.
 
-## 2. Threat Assumptions
+### Signer threshold
 
-### Signer Threshold Compromise
+A compromised signer threshold is serious. It can authorize a malicious
+request, reconstruct `A`, and open the private Recovery Descriptor. It still
+needs enough guardian contributions to recover `DEK` and ciphertext, but it
+can initiate that process against a recipient it controls.
 
-If an attacker compromises the signer threshold, it can authorize a malicious recovery and reconstruct A.
+The guardian delay and owner cancellation path provide a reaction window.
+They do not make signer-threshold compromise harmless.
 
-The delay and owner hard-cancellation mechanism provide a reaction window while the owner retains its per-config cancellation key; they do not make a compromised signer threshold harmless.
+### Fewer than the guardian threshold
 
-### Guardian Threshold Compromise
+These guardians cannot reconstruct `DEK`. Their stored DEK shares are also
+encrypted under keys derived from `A`. They can withhold, corrupt, or expose
+their own records and may reveal that their opaque slots were accessed.
 
-Enough malicious guardians may ignore their own delay policy and expose all of their stored material.
+### Guardian threshold
 
-Because their DEK shares are encrypted under A-derived keys, guardian compromise alone must not reveal the secret without A.
+A guardian threshold can ignore its local delay policy and expose all of its
+stored records. Without `A`, those records should not reveal `DEK` or the
+plaintext. The compromise is still an availability and metadata failure and
+becomes a recovery failure if the attacker also obtains sufficient
+authorization material.
 
-### Combined Failure
+### Combined signer and guardian compromise
 
-An attacker that crosses both relevant threshold assumptions can recover early.
+An attacker that obtains the signer threshold and enough guardian material can
+complete recovery. The protocol separates authorization from custody; it does
+not make compromise of both sides safe.
 
-Do not market the protocol as requiring two independently compromised quorums for every possible attack path. The correct statement is that the design separates authorization material from custody material and removes any single guardian or relay as an ultimate authority.
+### Owner cancellation key
 
-### Relay Failure
+The owner key cannot authorize recovery, reconstruct `A`, open the Recovery
+Descriptor, or decrypt the payload. Its compromise permits valid
+request-specific cancellation and therefore denial of service. Losing it does
+not reveal the secret, but removes the owner's cancellation ability.
 
-A relay can always drop or delay traffic. Availability cannot be cryptographically forced.
+### Relay, config store, and witness compromise
 
-Authenticated messages prevent successful unnoticed modification or recipient substitution.
+A relay can observe and manipulate delivery timing, sizes, adjacent endpoints,
+and opaque mailbox use. End-to-end encryption and signatures prevent it from
+reading payloads or making an altered message validate. It can always drop
+traffic.
 
-### Endpoint Knowledge
+A protocol-v2 config store sees pseudonymous public capsules and access timing.
+It has no plaintext descriptor or recovery key. A protocol-v3 witness sees
+capsule hashes, epoch order, rotation timing, and owner rotation-veto events.
+Within the stated `f` bound, witness quorums reject rollback and two finalized
+children of one predecessor. An unavailable or conflicting quorum causes a
+fresh client to fail closed.
 
-A signer asked to approve a request knows it is participating in some recovery.
+## Recovery delay
 
-A selected guardian that releases a slot knows that one of its opaque stored records is being accessed/released.
+Recovery uses two signer phases:
 
-The protocol aims to hide owner identity and global relationship metadata, not the local fact that an endpoint was asked to act.
+1. Begin starts a guardian-local monotonic delay.
+2. Release authorizes contribution after the delay.
 
-## 3. Delay Model
+The default production policy requires at least 24 hours. Demo commands may
+use a shorter delay when nodes explicitly allow insecure demo timing.
 
-The 24-hour delay is guardian-policy enforced with a monotonic clock.
+This is policy enforcement, not a trust-free cryptographic timelock. The
+protocol does not use drand as a security-critical delay. Malicious guardians
+can ignore their own clocks and software rules. A reboot that makes monotonic
+time ambiguous causes an honest guardian to refuse release.
 
-It is not a trust-free cryptographic timelock.
+## Owner hard cancellation
 
-The protocol does not use drand as a security-critical delay because the project requires a PQ-oriented threat model and the current design intentionally avoids that dependency.
+Setup creates an independent per-config cancellation signing key. Guardians
+pin its public key. The private key stays in the owner's control file.
 
-The simulator may compress the delay for visualization, but the production configuration must enforce at least 24 hours.
+A valid cancellation binds the exact request, canonical request digest,
+recovery recipient, cancellation-response recipient, nonce, and owner key. An
+honest guardian stores a permanent tombstone before returning its signed
+acknowledgement. A cancellation that arrives before Begin still kills the
+later reordered Begin.
 
-## 4. Owner Hard-Cancellation Model
+The owner treats recovery cancellation as complete after valid
+acknowledgements from `n - k + 1` distinct guardians. This leaves fewer than
+`k` available for recovery. The guarantee assumes an acknowledging guardian
+keeps its promise. A malicious guardian may sign and later violate policy.
 
-Recovery uses two signer approval phases:
+Cancellation is not retroactive. A guardian records successful release before
+sending its contribution and refuses to acknowledge a later cancellation. The
+protocol cannot erase material that has already reached a recovery client.
 
-1. BeginRecoveryCertificate starts the guardian-local delay.
-2. ReleaseCertificate is required after the delay before release.
-
-Cancellation is owner-only and request-specific. Setup creates an independent
-per-config cancellation signing key. Its private half remains only in the
-owner's private control state; guardians pin the public half.
-
-A guardian that observes a valid owner signature must never release for that request.
-
-If cancellation is observed before Begin because the network reordered
-messages, the guardian stores a tombstone and rejects the later Begin.
-
-The guardian persists that tombstone before returning a signed
-`OwnerCancelAck` bound to the exact cancellation transcript. The owner accepts
-the distributed cancel as complete only after verifying acknowledgements from
-at least `n - k + 1` distinct guardians. This leaves fewer than `k` guardians
-available to satisfy the DEK recovery threshold. The guarantee assumes an
-acknowledging guardian is honest; a malicious node can sign and later violate
-its promise.
-
-An honest guardian records release before transmitting its contribution and
-will not acknowledge a later cancellation. Cancellation is therefore a
-reaction-window mechanism, not a way to revoke shares already delivered to a
-recovery client.
-
-Signers cannot cancel. The owner cancellation key cannot authorize Begin or
-Release and cannot decrypt protocol material.
-
-Guardians fail closed when release state is ambiguous.
-
-The owner key is a single point of availability for cancellation. Losing it
-does not expose the secret, but it removes the owner's ability to cancel. Its
-compromise permits denial of service through valid cancellations, not recovery.
-
-## 5. Post-Quantum Scope
-
-The prototype is post-quantum-skewed, not fully post-quantum.
-
-- transport key establishment uses X-Wing (ML-KEM-768 plus X25519),
-- symmetric encryption uses 256-bit keys,
-- Shamir and Reed-Solomon are not the PQ weak point,
-- signer signatures remain Ed25519 in the hackathon path and are therefore classical.
-
-The UI and documentation must not call the whole system fully post-quantum while Ed25519 remains security-critical.
-
-## 6. Security Invariants
-
-1. No plaintext secret is stored by signers, guardians, relay nodes, or the config store.
-2. Fewer than s valid A shares do not reconstruct A.
-3. Fewer than k valid DEK shares do not reconstruct DEK.
-4. A wrong A fails to decrypt guardian DEK shares.
-5. A guardian releases only for the exact approved request/recipient after its local delay and required release certificate.
-6. A valid observed owner hard cancellation permanently kills the request for an honest guardian.
-7. Tampered guardian material is rejected before reconstruction.
-8. A stale config version, replayed request id, or reused request nonce is rejected.
-9. Release votes prove pseudonymous signer membership against the pinned signer-set commitment; owner cancellation proves possession of the pinned per-config cancellation private key.
-10. The guardian roster is not stored publicly in plaintext.
-11. Final plaintext reconstruction occurs only on the recovery client.
-
-## 7. Explicit Non-Claims
-
-Do not claim:
-
-- bug-free software,
-- perfect anonymity,
-- information-theoretic metadata privacy,
-- unconditional 24-hour cryptographic timelock,
-- full PQ security while Ed25519 remains in the authorization path,
-- availability against an adversary that can drop all routes,
-- metadata privacy against every possible threshold collusion.
+Protocol-v3 rotation cancellation also needs a `2f+1` witness veto and enough
+old-guardian tombstones to break the handoff quorum. Non-owner abort needs a
+signer threshold; one signer cannot unlock or kill a rotation alone.
+
+## Guardian rotation
+
+Routine protocol-v3 rotation is not a recovery shortcut. It requires signer
+Intent, Begin, Delay, Release, and Activate decisions for the exact plan. It
+changes only the guardian epoch in the implemented one-for-one replacement
+profile. `A`, `DEK`, payload generation, ciphertext, guardian count, and
+threshold remain unchanged.
+
+The coordinator reconstructs `A` and encrypted ciphertext `C`. This exposes
+the private roster to that ephemeral client and lets it derive each guardian's
+wrapping key. It does not receive plaintext DEK shares or the full successor
+records. Each successor keeps its wrapped share locally and returns only a
+commitment leaf. Otherwise the A-holding coordinator could unwrap a threshold
+from its own transcript.
+
+Each successor verifies its FROST share, the common public package, its exact
+ciphertext fragment, index, and stable fragment proof. It stores the record as
+`PREPARED`, then signs the assembled material root. Signers reject a Ready
+certificate whose acknowledgements, root, descriptor, or successor capsule do
+not agree. A witness quorum makes the cutover final.
+
+The old epoch remains `ACTIVE` during preparation. After activation it drains
+only requests that began before cutover. New requests must use the new epoch.
+Failed preparation and valid pre-activation cancellation preserve the old
+configuration.
+
+### Historical shares
+
+Refresh creates a new sharing of the same `DEK`. The protocol does not accept
+old and new shares as one reconstruction set. Every recovery contribution
+binds the exact `ConfigRef`, and the production wrapper rejects mixed epoch
+labels before FROST reconstruction.
+
+The proactive claim is conditional. An attacker must remain below the
+provider's corruption threshold in each epoch and must not retain a complete
+threshold. Honest nodes must erase old shares and ephemeral refresh state.
+Rotation cannot revoke a `DEK`, old threshold, or plaintext that an attacker
+already learned.
+
+The current ephemeral coordinator preserves safe actor state if it crashes,
+because the old epoch remains active until witness QC. It is not a replicated,
+automatically resumed job service.
+
+## Metadata leakage
+
+The protocol hides message contents from relays and avoids publishing the
+owner-to-guardian map. It does not provide perfect anonymity.
+
+A participating signer knows it approved some recovery or rotation. A selected
+guardian knows one of its opaque records was accessed. Relays see timing,
+volume, adjacent endpoints, and mailbox handles. Witnesses see epoch activity.
+A global observer can correlate timing and traffic volume.
+
+OFF, BASIC, and STRONG metadata modes are simulator models. The live network
+uses direct relay forwarding and does not implement STRONG cover traffic,
+mixing, or dummy packets. See
+[METADATA_RESISTANCE.md](METADATA_RESISTANCE.md).
+
+## Availability
+
+Thresholds tolerate some offline or corrupt actors. They do not guarantee
+availability when too many signers, guardians, witnesses, relays, or stores are
+unreachable. A network adversary that drops every route can stop recovery.
+Cryptography cannot force packet delivery or honest approval.
+
+Honest nodes fail closed on ambiguous state. That protects safety at the cost
+of availability during partitions, clock ambiguity, conflicting witness views,
+or incomplete certificates.
+
+Merkle custody sampling detects a wrong sampled block. It is not a formal
+proof of retrievability and does not prove that a guardian can return its whole
+record later.
+
+## Post-quantum scope
+
+The project is post-quantum-skewed, not fully post-quantum.
+
+- X-Wing combines ML-KEM-768 and X25519 for transport key establishment.
+- Payload and share encryption use 256-bit symmetric keys.
+- Shamir sharing and Reed-Solomon coding are not the classical public-key weak
+  point.
+- Ed25519 signatures and Ristretto255 FROST remain classical and are
+  security-critical.
+
+The X-Wing implementation and the exact FROST RTS plus refresh-DKG integration
+still need external review for this use.
+
+## Implementation limits
+
+- The project has not received a professional protocol or code audit.
+- Node JSON state relies on filesystem permissions and is not encrypted at
+  rest in the demo runtime.
+- Docker uses HTTP inside its bridge, automatic signer approval, and a short
+  demo delay.
+- Secret zeroization reduces ordinary memory lifetime but does not cover swap,
+  crash dumps, allocator copies, backups, or compromised firmware.
+- Secure physical deletion cannot be proven remotely.
+- The simulator may inspect privileged state for visualization; protocol
+  actors may not.
+- Existing v3 artifacts from before the current capsule and acknowledgement
+  fields must be recreated. There is no migration that invents missing signed
+  data.
+
+## Security invariants
+
+1. Network nodes do not store the plaintext protected secret.
+2. Fewer than `s` valid `A` shares do not reconstruct `A`.
+3. Fewer than `k` valid DEK shares do not reconstruct `DEK`.
+4. A wrong `A` fails to open guardian DEK shares.
+5. Recovery binds the exact configuration, request, recipient, nonce, actor,
+   and transcript.
+6. An honest guardian releases only after valid Begin, elapsed local delay,
+   valid Release, and an unambiguous non-cancelled state.
+7. An observed valid owner cancellation permanently kills that request for an
+   honest guardian.
+8. Corrupted records and fragments fail integrity checks before
+   reconstruction.
+9. The public bootstrap data contains no plaintext guardian roster.
+10. Protocol-v3 recovery rejects stale or mixed guardian epochs.
+11. Routine rotation does not decrypt the payload or give the coordinator a
+    DEK-share threshold.
+12. Final plaintext reconstruction occurs only on the recovery client.
+
+## Explicit non-claims
+
+Master Recovery does not claim:
+
+- bug-free or production-ready software;
+- a professional security or cryptographic audit;
+- perfect anonymity or information-theoretic metadata privacy;
+- a production mixnet in the live runtime;
+- an unconditional cryptographic timelock;
+- availability against network-wide packet dropping;
+- full post-quantum security;
+- provable physical deletion or formal proof of retrievability;
+- safety after a complete signer and guardian threshold compromise;
+- healing after an attacker learns `DEK`, plaintext, or a complete old share
+  threshold.
+
+## Dependency audit
+
+The 2026-08-16 `cargo audit` run found no known vulnerabilities and one allowed
+unmaintained warning: RUSTSEC-2023-0089 for `atomic-polyfill 1.0.3`. It enters
+the all-target graph through `frost-core 3.0.0 -> postcard 1.1.3 -> heapless
+0.7.17` and is selected only by specific embedded targets, not the native demo
+build. Those embedded targets are unsupported. A production release still
+needs an upgraded provider chain or an external-review-approved disposition.
