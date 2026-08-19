@@ -134,33 +134,59 @@ impl<T: Serialize> Persisted<T> {
     }
 }
 
+/// Bumped whenever a persisted state file gains a field an older build would
+/// silently discard. Serde ignores unknown fields, so an older binary that
+/// loads a newer file and then saves would erase the fields it does not know
+/// about, permanently losing guardian rotation records.
+const STATE_SCHEMA_VERSION: u64 = 1;
+const SCHEMA_VERSION_FIELD: &str = "schema_version";
+
 fn load_json<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {
     if !path.exists() {
         return Ok(T::default());
     }
-    Ok(serde_json::from_slice(&fs::read(path)?)?)
+    let document: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
+    let found = document
+        .get(SCHEMA_VERSION_FIELD)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(STATE_SCHEMA_VERSION);
+    if found > STATE_SCHEMA_VERSION {
+        anyhow::bail!(
+            "state file {} has schema v{found}, newer than the v{} this build              understands; refusing to load because saving would drop unknown fields",
+            path.display(),
+            STATE_SCHEMA_VERSION
+        );
+    }
+    Ok(serde_json::from_value(document)?)
 }
 
 fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let parent = path.parent().context("state path has no parent")?;
     fs::create_dir_all(parent)?;
     let temporary = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec_pretty(value)?;
+    let mut document = serde_json::to_value(value)?;
+    if let Some(object) = document.as_object_mut() {
+        object.insert(
+            SCHEMA_VERSION_FIELD.to_string(),
+            serde_json::Value::from(STATE_SCHEMA_VERSION),
+        );
+    }
+    let bytes = serde_json::to_vec_pretty(&document)?;
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
     #[cfg(unix)]
     {
-        use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(&temporary)?;
+        options.mode(0o600);
+    }
+    {
+        use std::io::Write;
+        // fsync on every platform: the previous non-unix path used fs::write
+        // with no sync, so a crash after rename could expose a truncated file.
+        let mut file = options.open(&temporary)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
     }
-    #[cfg(not(unix))]
-    fs::write(&temporary, bytes)?;
     fs::rename(temporary, path)?;
     #[cfg(unix)]
     {
@@ -2354,6 +2380,57 @@ mod rotation_tests {
         let entry = &rebooted.entries[&hex::encode(genesis.config_ref.config_id)];
         assert_eq!(entry.register.highest_guardian_epoch, 2);
         assert_eq!(entry.register.highest_capsule_hash, successor.capsule_hash);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn state_files_carry_a_schema_version_and_refuse_newer_ones() {
+        let temp = std::env::temp_dir().join(format!(
+            "gp-schema-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        let path = temp.join("state.json");
+
+        // every save stamps the current schema version
+        let mut disk = SignerDisk::default();
+        disk.last_approval_at.insert("mailbox".into(), 7);
+        save_json(&path, &disk).unwrap();
+        let raw: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            raw.get(SCHEMA_VERSION_FIELD).and_then(|v| v.as_u64()),
+            Some(STATE_SCHEMA_VERSION)
+        );
+
+        // and it round-trips through the version check
+        let loaded: SignerDisk = load_json(&path).unwrap();
+        assert_eq!(loaded.last_approval_at.get("mailbox"), Some(&7));
+
+        // a file written by a newer build is refused rather than silently
+        // re-saved with the unknown fields dropped
+        let mut newer = raw.clone();
+        newer.as_object_mut().unwrap().insert(
+            SCHEMA_VERSION_FIELD.to_string(),
+            serde_json::Value::from(STATE_SCHEMA_VERSION + 1),
+        );
+        newer
+            .as_object_mut()
+            .unwrap()
+            .insert("field_from_the_future".into(), serde_json::Value::from(1));
+        fs::write(&path, serde_json::to_vec(&newer).unwrap()).unwrap();
+        let refused = load_json::<SignerDisk>(&path);
+        assert!(refused.is_err(), "newer schema must not load");
+
+        // a legacy file with no version field still loads
+        let mut legacy = raw.clone();
+        legacy.as_object_mut().unwrap().remove(SCHEMA_VERSION_FIELD);
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let legacy_loaded: SignerDisk = load_json(&path).unwrap();
+        assert_eq!(legacy_loaded.last_approval_at.get("mailbox"), Some(&7));
+
         fs::remove_dir_all(temp).unwrap();
     }
 }
