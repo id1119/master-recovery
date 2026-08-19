@@ -13,6 +13,7 @@ members = [
     "crates/gp-cli",
     "crates/gp-network",
 ]
+exclude = ["crates/*/fuzz"]
 default-members = ["crates/gp-cli"]
 
 [workspace.package]
@@ -32,7 +33,6 @@ hex = "0.4"
 hkdf = "0.12"
 rand = "0.9"
 rand_chacha = "0.9"
-rand08 = { package = "rand", version = "0.8" }
 rand_chacha08 = { package = "rand_chacha", version = "0.3" }
 rand_chacha10 = { package = "rand_chacha", version = "0.10" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -49,6 +49,7 @@ zeroize = { version = "1.8", features = ["derive", "serde"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [workspace.lints.clippy]
 all = "warn"

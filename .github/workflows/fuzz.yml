@@ -1,0 +1,46 @@
+name: Fuzz
+
+on:
+  push:
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  schedule:
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dir: crates/gp-wire
+            target: deframe
+          - dir: crates/gp-wire
+            target: transcripts
+          - dir: crates/gp-crypto
+            target: merkle
+          - dir: crates/gp-crypto
+            target: verify
+          - dir: crates/gp-crypto
+            target: recover
+          - dir: crates/gp-core
+            target: machine
+          - dir: crates/gp-core
+            target: guardian
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-fuzz --locked
+      - name: Fuzz ${{ matrix.target }}
+        working-directory: ${{ matrix.dir }}
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=120

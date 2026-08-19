@@ -9,8 +9,6 @@ anyhow.workspace = true
 axum.workspace = true
 gp-ipc = { path = "../gp-ipc" }
 gp-sim = { path = "../gp-sim" }
-gp-transport = { path = "../gp-transport" }
-gp-types = { path = "../gp-types" }
 serde.workspace = true
 tokio.workspace = true
 

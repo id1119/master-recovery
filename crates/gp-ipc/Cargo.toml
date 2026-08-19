@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 gp-sim = { path = "../gp-sim" }
-gp-transport = { path = "../gp-transport" }
 serde.workspace = true
 
 [lints]

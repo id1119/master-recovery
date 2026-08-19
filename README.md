@@ -1,5 +1,8 @@
 # Master Recovery
 
+[![CI](https://github.com/id1119/master-recovery/actions/workflows/ci.yml/badge.svg)](https://github.com/id1119/master-recovery/actions/workflows/ci.yml)
+[![Release](https://github.com/id1119/master-recovery/actions/workflows/release.yml/badge.svg)](https://github.com/id1119/master-recovery/actions/workflows/release.yml)
+
 Master Recovery is an experimental protocol for recovering a critical secret
 without giving one person, company, or backup key sole control of recovery.
 

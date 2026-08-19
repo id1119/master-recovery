@@ -9,5 +9,8 @@ gp-types = { path = "../gp-types" }
 serde.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+proptest = "1"
+
 [lints]
 workspace = true

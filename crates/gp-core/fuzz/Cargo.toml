@@ -1,0 +1,29 @@
+[package]
+name = "gp-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+gp-core = { path = ".." }
+gp-types = { path = "../../gp-types" }
+
+[[bin]]
+name = "machine"
+path = "fuzz_targets/machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "guardian"
+path = "fuzz_targets/guardian.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

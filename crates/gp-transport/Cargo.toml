@@ -9,7 +9,6 @@ gp-crypto = { path = "../gp-crypto" }
 gp-types = { path = "../gp-types" }
 rand.workspace = true
 serde.workspace = true
-thiserror.workspace = true
 
 [lints]
 workspace = true

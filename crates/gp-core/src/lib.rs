@@ -7,6 +7,9 @@ use gp_types::{Id32, PROTOCOL_VERSION, PendingRecovery, RecoveryRequest, Recover
 mod rotation;
 pub use rotation::*;
 
+#[cfg(kani)]
+mod proofs;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecoveryEvent {
     RequestCreated,

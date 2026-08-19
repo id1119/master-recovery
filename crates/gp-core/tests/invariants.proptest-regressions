@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7cb267ae28ba7d74200dd3b9353f381e5c8e4ec6a6fa9b3960894b64e69d0cb1 # shrinks to delay = 1, wall = 71, monotonic = 0, expiry = 72, requested_at = 0, stale_version = 0, version = 1
+cc abb703ce1413a6a32badfb2922adf497b60547e455f96b082b5901ebcf5eee56 # shrinks to events = [ExpiryReached], nows = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], delays = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+cc 354d6dd3a5af88519758e2a5a8e066cf7bd1f63e9aa43af6e955f7fb02b8dc8c # shrinks to delay = 0, wall = 0, monotonic = 0, expiry = 50, requested_at = 0, stale_version = 9, version = 9
+cc 81a98d99eaf1afef0c1a2736116e444703bc1a62639670a9374cf6b0047405ff # shrinks to events = [RequestCreated, ApprovalThresholdReached, OwnerCancelObserved], nows = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], delays = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+cc bf339b59a22ea84d29fab1eb23d6ef50d5dc665b2ee431f8cee8af65f0de3012 # shrinks to delay = 0, wall = 0, monotonic = 0, expiry = 50, requested_at = 1, version = 1

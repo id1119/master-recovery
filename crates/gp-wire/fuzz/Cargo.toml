@@ -1,0 +1,29 @@
+[package]
+name = "gp-wire-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+gp-wire = { path = ".." }
+gp-types = { path = "../../gp-types" }
+
+[[bin]]
+name = "deframe"
+path = "fuzz_targets/deframe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transcripts"
+path = "fuzz_targets/transcripts.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
