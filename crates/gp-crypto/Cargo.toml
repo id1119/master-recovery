@@ -22,11 +22,14 @@ zeroize.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+ed25519-compact = "2.1"
 hex.workspace = true
 hkdf.workspace = true
-rand_core10.workspace = true
-sha2.workspace = true
+hmac = "0.12"
 proptest = "1"
+rand_core10.workspace = true
+ring = "0.17"
+sha2.workspace = true
 wycheproof = "0.6.0"
 
 [[bench]]
