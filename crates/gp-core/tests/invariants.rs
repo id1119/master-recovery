@@ -1,4 +1,4 @@
-use gp_core::{CoreError, GuardianMachine, RecoveryEvent, RecoveryMachine};
+use gp_core::{Action, CoreError, GuardianMachine, RecoveryEvent, RecoveryMachine};
 use gp_types::{CryptoSuite, PROTOCOL_VERSION, RecoveryRequest, RecoveryState};
 use proptest::prelude::*;
 
@@ -33,7 +33,7 @@ impl Model {
         }
     }
 
-    fn step(&mut self, event: &RecoveryEvent, now: u64, delay: u64) -> Result<(), CoreError> {
+    fn step(&mut self, event: &RecoveryEvent, now: u64, delay: u64) -> Result<Vec<Action>, CoreError> {
         match self.state {
             ModelState::Terminal(state) => {
                 let err = if state == RecoveryState::Cancelled {
@@ -44,48 +44,60 @@ impl Model {
                 Err(err)
             }
             ModelState::Active(from) => {
-                let to = match (from, event) {
-                    (RecoveryState::Created, RecoveryEvent::RequestCreated) => {
-                        RecoveryState::AwaitingApprovals
-                    }
-                    (RecoveryState::AwaitingApprovals, RecoveryEvent::ApprovalThresholdReached) => {
-                        RecoveryState::Authorized
-                    }
+                let (to, actions) = match (from, event) {
+                    (RecoveryState::Created, RecoveryEvent::RequestCreated) => (
+                        RecoveryState::AwaitingApprovals,
+                        vec![Action::RequestSignerApprovals],
+                    ),
+                    (RecoveryState::AwaitingApprovals, RecoveryEvent::ApprovalThresholdReached) => (
+                        RecoveryState::Authorized,
+                        vec![
+                            Action::DecryptRecoveryDescriptor,
+                            Action::SendBeginCertificate,
+                        ],
+                    ),
                     (RecoveryState::AwaitingApprovals, RecoveryEvent::OwnerCancelObserved)
-                    | (RecoveryState::Authorized, RecoveryEvent::OwnerCancelObserved) => {
-                        RecoveryState::Cancelled
-                    }
+                    | (RecoveryState::Authorized, RecoveryEvent::OwnerCancelObserved)
+                    | (RecoveryState::DelayPending, RecoveryEvent::OwnerCancelObserved) => (
+                        RecoveryState::Cancelled,
+                        vec![Action::RefuseRelease, Action::ZeroizeRecoverySecrets],
+                    ),
                     (RecoveryState::Authorized, RecoveryEvent::BeginAccepted) => {
                         self.not_before = Some(now.saturating_add(delay));
-                        RecoveryState::DelayPending
+                        (
+                            RecoveryState::DelayPending,
+                            vec![
+                                Action::WaitUntil(now.saturating_add(delay)),
+                                Action::RequestReleaseVotes,
+                            ],
+                        )
                     }
                     (RecoveryState::DelayPending, RecoveryEvent::ReleaseCertificateReady) => {
                         if now < self.not_before.unwrap_or(u64::MAX) {
                             return Err(CoreError::InvalidTransition { from });
                         }
-                        RecoveryState::Releasing
+                        (RecoveryState::Releasing, vec![Action::RequestGuardianContributions])
                     }
-                    (RecoveryState::DelayPending, RecoveryEvent::OwnerCancelObserved) => {
-                        RecoveryState::Cancelled
-                    }
-                    (RecoveryState::Releasing, RecoveryEvent::GuardianThresholdReached) => {
-                        RecoveryState::Completed
-                    }
+                    (RecoveryState::Releasing, RecoveryEvent::GuardianThresholdReached) => (
+                        RecoveryState::Completed,
+                        vec![Action::ReconstructLocally, Action::ZeroizeRecoverySecrets],
+                    ),
                     (RecoveryState::Created, RecoveryEvent::ExpiryReached)
                     | (RecoveryState::AwaitingApprovals, RecoveryEvent::ExpiryReached)
                     | (RecoveryState::Authorized, RecoveryEvent::ExpiryReached)
                     | (RecoveryState::DelayPending, RecoveryEvent::ExpiryReached)
                     | (RecoveryState::Releasing, RecoveryEvent::ExpiryReached)
-                    | (RecoveryState::Completed, RecoveryEvent::ExpiryReached) => {
-                        RecoveryState::Expired
-                    }
+                    | (RecoveryState::Completed, RecoveryEvent::ExpiryReached) => (
+                        RecoveryState::Expired,
+                        vec![Action::RefuseRelease, Action::ZeroizeRecoverySecrets],
+                    ),
                     _ => return Err(CoreError::InvalidTransition { from }),
                 };
                 self.state = match to {
                     RecoveryState::Cancelled | RecoveryState::Expired => ModelState::Terminal(to),
                     other => ModelState::Active(other),
                 };
-                Ok(())
+                Ok(actions)
             }
         }
     }
@@ -108,7 +120,13 @@ proptest! {
             let actual = machine.apply(event.clone(), now, delay);
             let expected = model.step(event, now, delay);
             match (actual, expected) {
-                (Ok(_), Ok(())) => {}
+                (Ok(actions), Ok(expected_actions)) => {
+                    prop_assert_eq!(
+                        actions, expected_actions,
+                        "action divergence at step {}",
+                        i
+                    );
+                }
                 (Err(CoreError::InvalidTransition { from }), Err(CoreError::InvalidTransition { from: expected_from })) => {
                     prop_assert_eq!(from, expected_from, "invalid transition mismatch at step {}", i);
                 }
