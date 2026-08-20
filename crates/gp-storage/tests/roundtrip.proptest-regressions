@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b8f6292ebbeed78b807a01e81d170a9983a6f8fd2c9f7f2166ab7209400965d7 # shrinks to guardian_id = 1, mailbox = "\0", signing_seed = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], config_id = [0, 5, 65, 25, 227, 4, 162, 164, 10, 43, 248, 245, 125, 164, 241, 208, 13, 77, 214, 191, 192, 231, 158, 156, 50, 164, 42, 118, 136, 18, 59, 136], payload_generation = 633281, authorization_epoch = 79450, guardian_epoch = 227888, epoch_binding = [96, 221, 126, 213, 211, 129, 246, 13, 89, 176, 128, 123, 15, 58, 195, 247, 245, 174, 105, 107, 183, 84, 4, 39, 207, 38, 189, 173, 233, 93, 137, 77], config_version = 234394, slot = [93, 177, 29, 247, 194, 247, 35, 212, 175, 10, 228, 7, 119, 2, 225, 118, 171, 226, 106, 224, 1, 32, 133, 57, 140, 253, 47, 228, 2, 192, 201, 19]

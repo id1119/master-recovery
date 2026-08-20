@@ -8,6 +8,7 @@ license.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
+proptest = "1.11.0"
 serde_json.workspace = true
 
 [lints]

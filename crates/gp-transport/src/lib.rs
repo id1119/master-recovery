@@ -294,4 +294,94 @@ mod tests {
             0
         );
     }
+
+    fn tag_shape(tag: &str, epoch: u64, hop: u8) -> bool {
+        // Exactly the `mbx-{epoch:04x}-{hop:02x}-{rnd:04x}` shape: fixed
+        // prefix plus a 4-hex-digit suffix.
+        let prefix = format!("mbx-{epoch:04x}-{hop:02x}-");
+        tag.len() == prefix.len() + 4
+            && tag.starts_with(&prefix)
+            && tag.as_bytes()[prefix.len()..]
+                .iter()
+                .all(|byte| byte.is_ascii_hexdigit())
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(64))]
+
+        #[test]
+        fn strong_mode_outer_fields_are_indistinguishable(
+            seed in 0_u64..1_000_000,
+            real_messages in 1_usize..=8,
+            payload_size in 1_usize..=8192,
+        ) {
+            let config = TransportConfig::for_mode(MetadataMode::Strong);
+            let summary = simulate_observer(&config, seed, real_messages, payload_size);
+            let packets = &summary.packets;
+
+            assert!(summary.fixed_outer_format);
+            assert!(!summary.trivially_isolatable);
+            assert!(packets.len() > 0);
+            assert!(summary.cover_packets > 0, "cover traffic must be present");
+
+            // The outer fields an observer can read are structurally identical
+            // for every packet: fixed format, fixed size bucket, fixed route
+            // shapes, identical mailbox-tag shape.
+            for packet in packets {
+                assert_eq!(packet.outer_format, "gp-cell/v1");
+                assert_eq!(packet.size_bucket, config.cell_size);
+                assert_eq!(packet.size_bucket, 2048);
+                match packet.previous_hop.as_str() {
+                    "opaque-client" => {
+                        assert_eq!(packet.next_hop, "mix-1");
+                        assert!(tag_shape(&packet.mailbox_tag, packet.epoch, 0));
+                    }
+                    "mix-1" => {
+                        assert_eq!(packet.next_hop, "mix-2");
+                        assert!(tag_shape(&packet.mailbox_tag, packet.epoch, 1));
+                    }
+                    "mix-2" => {
+                        assert_eq!(packet.next_hop, "opaque-mailbox");
+                        assert!(tag_shape(&packet.mailbox_tag, packet.epoch, 2));
+                    }
+                    other => panic!("unexpected previous hop {other:?}"),
+                }
+            }
+
+            // The observable outer-field space is exactly the fixed 3-hop
+            // topology with one format and one size bucket: there is no
+            // field on which a real packet can be told apart from a dummy.
+            let shapes: std::collections::BTreeSet<_> = packets
+                .iter()
+                .map(|packet| {
+                    (
+                        packet.outer_format.clone(),
+                        packet.size_bucket,
+                        packet.previous_hop.clone(),
+                        packet.next_hop.clone(),
+                    )
+                })
+                .collect();
+            let expected: std::collections::BTreeSet<_> = [
+                ("gp-cell/v1".to_string(), 2048, "opaque-client".to_string(), "mix-1".to_string()),
+                ("gp-cell/v1".to_string(), 2048, "mix-1".to_string(), "mix-2".to_string()),
+                ("gp-cell/v1".to_string(), 2048, "mix-2".to_string(), "opaque-mailbox".to_string()),
+            ]
+            .into_iter()
+            .collect();
+            assert_eq!(shapes, expected, "observer must see only the fixed route shapes");
+        }
+
+        #[test]
+        fn strong_mode_deterministic_replay(
+            seed in 0_u64..1_000_000,
+            real_messages in 1_usize..=8,
+            payload_size in 1_usize..=8192,
+        ) {
+            let config = TransportConfig::for_mode(MetadataMode::Strong);
+            let first = simulate_observer(&config, seed, real_messages, payload_size);
+            let second = simulate_observer(&config, seed, real_messages, payload_size);
+            assert_eq!(first, second, "same seed must give the identical observer view");
+        }
+    }
 }

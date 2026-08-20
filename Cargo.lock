@@ -909,6 +909,7 @@ dependencies = [
  "proptest",
  "rand_chacha 0.10.0",
  "rand_chacha 0.3.1",
+ "rand_core 0.10.1",
  "reed-solomon-turbo",
  "rs_merkle",
  "sha2",
@@ -983,6 +984,7 @@ version = "0.1.0"
 dependencies = [
  "gp-types",
  "hex",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror",
@@ -995,6 +997,7 @@ version = "0.1.0"
 dependencies = [
  "gp-crypto",
  "gp-types",
+ "proptest",
  "rand 0.9.5",
  "serde",
 ]
@@ -1003,6 +1006,7 @@ dependencies = [
 name = "gp-types"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "serde",
  "serde_json",
 ]

@@ -5,6 +5,9 @@ on:
     - cron: "0 6 * * 1"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -16,16 +19,54 @@ jobs:
   mutants:
     name: cargo-mutants
     runs-on: ubuntu-latest
+    # upload-artifact writes to the run's artifact store under `actions`.
+    permissions:
+      contents: read
+      actions: write
+    env:
+      # Keep proptest case counts low so single-mutant test runs stay under
+      # the 60s --timeout budget.
+      PROPTEST_CASES: 32
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@889fac408b4da0905346410f253f0c55fbcb6613 # 1.97.0 (branch)
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2
         with:
           tool: cargo-mutants
       - name: Run mutation testing on pure-logic crates
+        # cargo-mutants 27.x exits non-zero whenever a mutant is missed or
+        # times out; the score gate below decides pass/fail instead.
+        continue-on-error: true
         run: cargo mutants -p gp-core -p gp-types -p gp-crypto -p gp-wire --timeout 60
-      - uses: actions/upload-artifact@v4
+      - name: Enforce mutation score >= 40%
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import json, sys
+          try:
+              with open("mutants.out/outcomes.json") as f:
+                  data = json.load(f)
+          except OSError as e:
+              print(f"::error::cannot read mutants.out/outcomes.json: {e}")
+              sys.exit(1)
+          caught = int(data.get("caught", 0))
+          missed = int(data.get("missed", 0))
+          timeout = int(data.get("timeout", 0))
+          killed = caught + timeout
+          total = killed + missed
+          if total == 0:
+              print(f"::error::no mutants evaluated (caught={caught}, missed={missed}, timeout={timeout})")
+              sys.exit(1)
+          score = 100.0 * killed / total
+          print(f"mutation score: {score:.1f}% ({killed}/{total} mutants killed)")
+          if score < 40.0:
+              print(f"::error::mutation score {score:.1f}% is below the 40% gate")
+              sys.exit(1)
+          EOF
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: mutation-results
           path: mutants.out

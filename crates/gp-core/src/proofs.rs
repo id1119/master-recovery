@@ -1,11 +1,11 @@
-//! Kani proof harnesses for the recovery state machine.
+//! Kani proof harnesses for the recovery and guardian state machines.
 //!
 //! Compiled only under `cargo kani` (the `kani` cfg is set exclusively by
-//! the Kani toolchain). Each harness verifies an invariant of
-//! `RecoveryMachine::apply` for every input, not just sampled ones.
+//! the Kani toolchain). Each harness verifies an invariant of the state
+//! machines for every input, not just sampled ones.
 
-use super::{Action, CoreError, RecoveryEvent, RecoveryMachine};
-use gp_types::RecoveryState;
+use super::{Action, CoreError, GuardianMachine, RecoveryEvent, RecoveryMachine};
+use gp_types::{CryptoSuite, Id32, PROTOCOL_VERSION, RecoveryRequest, RecoveryState};
 
 fn any_state() -> RecoveryState {
     match kani::any::<u8>() % 8 {
@@ -36,6 +36,20 @@ fn any_machine() -> RecoveryMachine {
     RecoveryMachine {
         state: any_state(),
         not_before: kani::any(),
+    }
+}
+
+fn any_request() -> RecoveryRequest {
+    RecoveryRequest {
+        protocol_version: kani::any(),
+        crypto_suite: CryptoSuite::default(),
+        config_id: kani::any(),
+        config_version: kani::any(),
+        request_id: kani::any(),
+        recovery_recipient_key: kani::any::<[u8; 32]>().to_vec(),
+        requested_at: kani::any(),
+        nonce: kani::any(),
+        expiry: kani::any(),
     }
 }
 
@@ -176,5 +190,97 @@ fn expiry_reached_expires_from_any_state() {
             ));
             assert_eq!(machine.state(), RecoveryState::Expired);
         }
+    }
+}
+
+#[kani::proof]
+fn validate_request_never_panics() {
+    let machine = GuardianMachine::new(kani::any(), kani::any());
+    let request = any_request();
+    let _ = machine.validate_request(&request);
+}
+
+#[kani::proof]
+fn validate_request_passes_implies_registered() {
+    let request = any_request();
+    let mut machine = GuardianMachine::new(kani::any(), kani::any());
+    kani::assume(machine.validate_request(&request).is_ok());
+    let digest: Id32 = kani::any();
+    let wall_now: u64 = kani::any();
+    let delay: u64 = kani::any();
+    let certificate_valid: bool = kani::any();
+
+    let result = machine.begin(&request, digest, wall_now, delay, certificate_valid);
+    match result {
+        Ok(not_before) => {
+            assert_eq!(not_before, wall_now.saturating_add(delay));
+            assert!(machine.seen.contains(&request.request_id));
+            assert!(machine.seen_nonces.contains(&request.nonce));
+            let entry = machine.pending.get(&request.request_id);
+            assert!(entry.is_some());
+            let entry = entry.unwrap();
+            assert_eq!(entry.request_digest, digest);
+            assert_eq!(entry.pending.request_id, request.request_id);
+            assert_eq!(entry.pending.state, RecoveryState::DelayPending);
+            assert_eq!(entry.expiry, request.expiry);
+        }
+        Err(error) => {
+            assert!(matches!(
+                error,
+                CoreError::FailClosed | CoreError::InvalidRequest | CoreError::Expired
+            ));
+            assert!(machine.seen.is_empty());
+            assert!(machine.seen_nonces.is_empty());
+            assert!(machine.pending.is_empty());
+        }
+    }
+}
+
+#[kani::proof]
+fn cancelled_requests_are_fail_closed() {
+    let mut machine = GuardianMachine::new(kani::any(), kani::any());
+    let request = any_request();
+    let digest: Id32 = kani::any();
+    let wall_now: u64 = kani::any();
+    let delay: u64 = kani::any();
+    let certificate_valid: bool = kani::any();
+
+    let _ = machine.begin(&request, digest, wall_now, delay, certificate_valid);
+    let cancel_result = machine.cancel(request.request_id, digest, true);
+    assert!(cancel_result.is_ok());
+    assert_eq!(
+        machine.state(&request.request_id),
+        Some(RecoveryState::Cancelled)
+    );
+
+    let retry = any_request();
+    kani::assume(retry.request_id == request.request_id);
+    assert!(matches!(
+        machine.begin(&retry, digest, wall_now, delay, certificate_valid),
+        Err(CoreError::StaleConfiguration)
+            | Err(CoreError::FailClosed)
+            | Err(CoreError::InvalidRequest)
+            | Err(CoreError::Expired)
+            | Err(CoreError::Cancelled)
+    ));
+
+    let state_unambiguous: bool = kani::any();
+    assert_eq!(
+        machine.authorize_release(
+            request.request_id,
+            digest,
+            wall_now,
+            certificate_valid,
+            state_unambiguous
+        ),
+        Err(CoreError::Cancelled)
+    );
+
+    assert_eq!(
+        machine.state(&request.request_id),
+        Some(RecoveryState::Cancelled)
+    );
+    if let Some(entry) = machine.pending.get(&request.request_id) {
+        assert_eq!(entry.pending.state, RecoveryState::Cancelled);
     }
 }

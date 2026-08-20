@@ -10,6 +10,9 @@ on:
     - cron: '0 2 * * 1'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: fuzz-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -36,11 +39,27 @@ jobs:
             target: machine
           - dir: crates/gp-core
             target: guardian
+          - dir: crates/gp-sim
+            target: deserialize_requests
+          - dir: crates/gp-sim
+            target: validate_begin
+          - dir: crates/gp-sim
+            target: validate_release
+          - dir: crates/gp-sim
+            target: validate_contribution
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly (branch)
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - run: cargo install cargo-fuzz --locked
+      # cargo-fuzz 0.13 has no --locked passthrough for the internal cargo
+      # build, so fail fast on a stale lockfile for fuzz crates that have one
+      # committed (gp-sim/fuzz has no Cargo.lock yet).
+      - name: Verify fuzz crate lockfile
+        if: matrix.dir != 'crates/gp-sim'
+        run: cargo check --manifest-path ${{ matrix.dir }}/fuzz/Cargo.toml --locked
       - name: Fuzz ${{ matrix.target }}
         working-directory: ${{ matrix.dir }}
         run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=120

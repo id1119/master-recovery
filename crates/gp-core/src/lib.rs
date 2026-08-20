@@ -436,4 +436,84 @@ mod tests {
             Err(CoreError::Replay)
         );
     }
+
+    fn completed_machine() -> RecoveryMachine {
+        let mut machine = RecoveryMachine::default();
+        machine.apply(RecoveryEvent::RequestCreated, 0, 10).unwrap();
+        machine
+            .apply(RecoveryEvent::ApprovalThresholdReached, 1, 10)
+            .unwrap();
+        machine.apply(RecoveryEvent::BeginAccepted, 2, 10).unwrap();
+        machine
+            .apply(RecoveryEvent::ReleaseCertificateReady, 12, 10)
+            .unwrap();
+        machine
+            .apply(RecoveryEvent::GuardianThresholdReached, 13, 10)
+            .unwrap();
+        machine
+    }
+
+    #[test]
+    fn completed_transitions_to_expired_via_expiry_reached() {
+        let mut machine = completed_machine();
+        assert_eq!(machine.state(), RecoveryState::Completed);
+        let actions = machine.apply(RecoveryEvent::ExpiryReached, 14, 10).unwrap();
+        assert_eq!(
+            actions,
+            vec![Action::RefuseRelease, Action::ZeroizeRecoverySecrets]
+        );
+        assert_eq!(machine.state(), RecoveryState::Expired);
+    }
+
+    #[test]
+    fn completed_refuses_owner_cancel() {
+        let mut machine = completed_machine();
+        assert_eq!(
+            machine.apply(RecoveryEvent::OwnerCancelObserved, 13, 10),
+            Err(CoreError::InvalidTransition {
+                from: RecoveryState::Completed
+            })
+        );
+        assert_eq!(machine.state(), RecoveryState::Completed);
+    }
+
+    #[test]
+    fn expired_is_absorbing() {
+        let mut machine = RecoveryMachine::default();
+        machine.apply(RecoveryEvent::RequestCreated, 0, 10).unwrap();
+        machine.apply(RecoveryEvent::ExpiryReached, 1, 10).unwrap();
+        assert_eq!(machine.state(), RecoveryState::Expired);
+        for event in vec![
+            RecoveryEvent::RequestCreated,
+            RecoveryEvent::ApprovalThresholdReached,
+            RecoveryEvent::BeginAccepted,
+            RecoveryEvent::ReleaseCertificateReady,
+            RecoveryEvent::GuardianThresholdReached,
+            RecoveryEvent::OwnerCancelObserved,
+            RecoveryEvent::ExpiryReached,
+        ] {
+            assert_eq!(machine.apply(event, 2, 10), Err(CoreError::Expired));
+            assert_eq!(machine.state(), RecoveryState::Expired);
+        }
+    }
+
+    #[test]
+    fn cancelled_refuses_begin_and_release() {
+        let mut machine = RecoveryMachine::default();
+        machine.apply(RecoveryEvent::RequestCreated, 0, 10).unwrap();
+        machine
+            .apply(RecoveryEvent::OwnerCancelObserved, 1, 10)
+            .unwrap();
+        assert_eq!(machine.state(), RecoveryState::Cancelled);
+        for event in vec![
+            RecoveryEvent::BeginAccepted,
+            RecoveryEvent::ReleaseCertificateReady,
+            RecoveryEvent::GuardianThresholdReached,
+            RecoveryEvent::ExpiryReached,
+            RecoveryEvent::OwnerCancelObserved,
+        ] {
+            assert_eq!(machine.apply(event, 2, 10), Err(CoreError::Cancelled));
+            assert_eq!(machine.state(), RecoveryState::Cancelled);
+        }
+    }
 }

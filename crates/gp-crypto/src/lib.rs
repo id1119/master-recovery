@@ -1061,4 +1061,84 @@ mod tests {
         assert!(other.open(&sealed, b"exact request").is_err());
         assert!(recipient.open(&sealed, b"other request").is_err());
     }
+
+    #[test]
+    fn successive_aead_calls_never_reuse_a_nonce_under_the_same_key() {
+        let key = [0x51; 32];
+        let mut nonce_counter = 0_u64;
+        let mut nonce = [0_u8; 24];
+        let mut prior: Option<AeadCiphertext> = None;
+        for message in 0_u8..32 {
+            nonce[..8].copy_from_slice(&nonce_counter.to_be_bytes());
+            nonce_counter += 1;
+            let sealed = aead_encrypt(&key, nonce, &[message], b"hot path").unwrap();
+            if let Some(prior) = &prior {
+                assert_ne!(sealed.nonce, prior.nonce);
+                assert_ne!(sealed.ciphertext, prior.ciphertext);
+            }
+            assert_eq!(
+                &*aead_decrypt(&key, &sealed, b"hot path").unwrap(),
+                &[message]
+            );
+            prior = Some(sealed);
+        }
+    }
+
+    #[test]
+    fn same_key_different_nonces_yield_distinct_ciphertexts() {
+        let key = [0x61; 32];
+        let plaintext = b"identical plaintext";
+        let first = aead_encrypt(&key, [0x22; 24], plaintext, b"ctx").unwrap();
+        let second = aead_encrypt(&key, [0x33; 24], plaintext, b"ctx").unwrap();
+        assert_ne!(first.nonce, second.nonce);
+        assert_ne!(first.ciphertext, second.ciphertext);
+        assert_eq!(&*aead_decrypt(&key, &first, b"ctx").unwrap(), plaintext);
+        assert_eq!(&*aead_decrypt(&key, &second, b"ctx").unwrap(), plaintext);
+    }
+
+    #[test]
+    fn seal_to_recipient_isolates_kem_seed_from_the_aead_nonce() {
+        let recipient = RecipientKeyPair::from_seed([9; 32]);
+        let first = seal_to_recipient(
+            recipient.public_key(),
+            [1; 32],
+            [2; 24],
+            b"authorization share",
+            b"ctx",
+        )
+        .unwrap();
+        let second = seal_to_recipient(
+            recipient.public_key(),
+            [3; 32],
+            [2; 24],
+            b"authorization share",
+            b"ctx",
+        )
+        .unwrap();
+        assert_ne!(first.kem_ciphertext, second.kem_ciphertext);
+        assert_ne!(first.payload.ciphertext, second.payload.ciphertext);
+        assert_eq!(
+            &*recipient.open(&first, b"ctx").unwrap(),
+            b"authorization share"
+        );
+        assert_eq!(
+            &*recipient.open(&second, b"ctx").unwrap(),
+            b"authorization share"
+        );
+    }
+
+    #[test]
+    fn v1_kdf_domains_separate_descriptor_share_and_guardian_index() {
+        let authorization_key = [1; 32];
+        let config_id = [2; 32];
+        let config_version = 3;
+        let descriptor = descriptor_key(&authorization_key, &config_id, config_version).unwrap();
+        let share_one =
+            guardian_share_key(&authorization_key, &config_id, config_version, 1).unwrap();
+        let share_two =
+            guardian_share_key(&authorization_key, &config_id, config_version, 2).unwrap();
+        assert_ne!(descriptor, share_one);
+        assert_ne!(descriptor, share_two);
+        assert_ne!(share_one, share_two);
+    }
 }

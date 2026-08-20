@@ -1611,4 +1611,129 @@ mod tests {
             assert!(!route.mailbox.contains("guardian"));
         }
     }
+
+    #[test]
+    fn begin_certificate_approvals_bind_to_the_exact_recipient() {
+        let (mut world, capsule, recipient, request) = fixture();
+        let mut rng = ChaCha20Rng::seed_from_u64(0xbeef);
+        let contributions = collect_signer_approvals(
+            &mut world.signers,
+            &request,
+            None,
+            capsule.signer_threshold,
+            &mut rng,
+        )
+        .unwrap();
+        let mut certificate = BeginRecoveryCertificate {
+            request: request.clone(),
+            signer_contributions: contributions,
+        };
+        assert!(validate_approvals_and_reconstruct(&certificate, &capsule, &recipient, 11).is_ok());
+
+        let other = RecipientKeyPair::from_seed([0x77; 32]);
+        certificate.request.recovery_recipient_key = other.public_key().to_vec();
+        for contribution in &mut certificate.signer_contributions {
+            contribution.request.recovery_recipient_key = other.public_key().to_vec();
+        }
+        assert!(
+            validate_approvals_and_reconstruct(&certificate, &capsule, &recipient, 11).is_err()
+        );
+        assert!(validate_begin_certificate(&certificate, &capsule, 11).is_err());
+    }
+
+    #[test]
+    fn release_certificate_votes_bind_to_the_exact_recipient() {
+        let (world, capsule, _recipient, request) = fixture();
+        let digest = sha256(&gp_wire::request_digest_preimage(&request).unwrap());
+        let mut certificate = make_release_certificate(
+            &world.signers,
+            &request,
+            digest,
+            None,
+            capsule.signer_threshold,
+        )
+        .unwrap();
+        assert!(validate_release_certificate(&certificate, &capsule, &request, 11).is_ok());
+
+        let other = RecipientKeyPair::from_seed([0x77; 32]);
+        let mut swapped = request.clone();
+        swapped.recovery_recipient_key = other.public_key().to_vec();
+        assert!(validate_release_certificate(&certificate, &capsule, &swapped, 11).is_err());
+
+        let swapped_digest = sha256(&gp_wire::request_digest_preimage(&swapped).unwrap());
+        for vote in &mut certificate.votes {
+            vote.recovery_recipient_key = other.public_key().to_vec();
+            vote.request_digest = swapped_digest;
+        }
+        assert!(validate_release_certificate(&certificate, &capsule, &swapped, 11).is_err());
+    }
+
+    #[test]
+    fn guardian_contribution_binds_to_the_exact_recipient_via_digest() {
+        let (world, capsule, _recipient, request) = fixture();
+        let descriptor = open_descriptor(&capsule, &world.authorization_key).unwrap();
+        let route = descriptor.guardians.first().unwrap();
+        let record = world.guardians[0].get(&route.opaque_slot_id).unwrap();
+        let digest = sha256(&gp_wire::request_digest_preimage(&request).unwrap());
+        let mut contribution = GuardianContribution {
+            protocol_version: PROTOCOL_VERSION,
+            config_id: request.config_id,
+            config_version: request.config_version,
+            request_id: request.request_id,
+            request_digest: digest,
+            guardian_index: route.guardian_index,
+            ciphertext_fragment: record.ciphertext_fragment.clone(),
+            encrypted_dek_share: record.encrypted_dek_share.clone(),
+            merkle_path_proof: record.merkle_path_proof.clone(),
+            guardian_signature: vec![],
+        };
+        contribution.guardian_signature = sign(
+            &signing_key(world.guardians[0].signing_seed),
+            &gp_wire::guardian_contribution(&contribution).unwrap(),
+        );
+        let dek_share = validate_guardian_contribution(
+            &contribution,
+            route,
+            &descriptor,
+            &request,
+            &world.authorization_key,
+        )
+        .unwrap();
+        assert_eq!(dek_share.len(), 33);
+
+        let other = RecipientKeyPair::from_seed([0x77; 32]);
+        let mut swapped = request.clone();
+        swapped.recovery_recipient_key = other.public_key().to_vec();
+        assert!(matches!(
+            validate_guardian_contribution(
+                &contribution,
+                route,
+                &descriptor,
+                &swapped,
+                &world.authorization_key,
+            ),
+            Err(SimError::RequestBinding)
+        ));
+
+        let mut rebound = contribution.clone();
+        rebound.request_digest = sha256(&gp_wire::request_digest_preimage(&swapped).unwrap());
+        assert!(
+            validate_guardian_contribution(
+                &rebound,
+                route,
+                &descriptor,
+                &swapped,
+                &world.authorization_key,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn flow_nonce_helper_never_reuses_nonces() {
+        let mut rng = ChaCha20Rng::seed_from_u64(0x5eed);
+        let nonces: Vec<[u8; 24]> = (0..64).map(|_| random_nonce(&mut rng)).collect();
+        let unique: BTreeSet<&[u8; 24]> = nonces.iter().collect();
+        assert_eq!(unique.len(), nonces.len());
+    }
 }

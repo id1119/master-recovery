@@ -303,3 +303,118 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    #[test]
+    fn interleaved_requests_keep_request_scoped_bookkeeping(
+        delay in 0_u64..=10,
+        wall in 0_u64..=100,
+        monotonic in 0_u64..=100,
+        expiry in 100_u64..=200,
+        requested_at in 0_u64..=40,
+        version in 1_u64..=10,
+    ) {
+        let mut machine = GuardianMachine::new([1; 32], version);
+        let a = request(version, [2; 32], [3; 32], requested_at.min(wall), expiry);
+        let b = request(version, [4; 32], [5; 32], requested_at.min(wall), expiry);
+        let digest_a = [9; 32];
+        let digest_b = [10; 32];
+
+        prop_assert!(machine.begin_at(&a, digest_a, wall, monotonic, delay, true).is_ok());
+        prop_assert!(machine.begin_at(&b, digest_b, wall, monotonic, delay, true).is_ok());
+        prop_assert_eq!(machine.state(&a.request_id), Some(RecoveryState::DelayPending));
+        prop_assert_eq!(machine.state(&b.request_id), Some(RecoveryState::DelayPending));
+
+        // Cancelling A with the wrong digest must not disturb B, and must not
+        // mark A cancelled.
+        prop_assert_eq!(
+            machine.cancel(a.request_id, digest_b, true),
+            Err(CoreError::RequestMismatch)
+        );
+        prop_assert_eq!(machine.state(&a.request_id), Some(RecoveryState::DelayPending));
+        prop_assert_eq!(machine.state(&b.request_id), Some(RecoveryState::DelayPending));
+
+        // Cancelling A with the correct digest kills only A.
+        prop_assert_eq!(machine.cancel(a.request_id, digest_a, true), Ok(()));
+        prop_assert_eq!(machine.state(&a.request_id), Some(RecoveryState::Cancelled));
+        prop_assert_eq!(machine.state(&b.request_id), Some(RecoveryState::DelayPending));
+        prop_assert_eq!(
+            machine.authorize_release_at(a.request_id, digest_a, wall, monotonic, true, true),
+            Err(CoreError::Cancelled)
+        );
+
+        // B is unaffected by A's cancellation and can still be released once
+        // its delay elapses.
+        if monotonic.saturating_add(delay) < expiry {
+            prop_assert_eq!(
+                machine.authorize_release_at(
+                    b.request_id,
+                    digest_b,
+                    wall,
+                    monotonic.saturating_add(delay),
+                    true,
+                    true,
+                ),
+                Ok(())
+            );
+            prop_assert_eq!(machine.state(&b.request_id), Some(RecoveryState::Releasing));
+        }
+    }
+
+    #[test]
+    fn replay_across_recipient_is_rejected(
+        delay in 0_u64..=10,
+        wall in 0_u64..=100,
+        monotonic in 0_u64..=100,
+        expiry in 100_u64..=200,
+        requested_at in 0_u64..=40,
+        version in 1_u64..=10,
+        recipient_key in prop::collection::vec(any::<u8>(), 1216..=1216),
+    ) {
+        let mut machine = GuardianMachine::new([1; 32], version);
+        let original = RecoveryRequest {
+            recovery_recipient_key: recipient_key.clone(),
+            ..request(version, [2; 32], [3; 32], requested_at.min(wall), expiry)
+        };
+        let digest = [9; 32];
+        prop_assert!(machine.begin_at(&original, digest, wall, monotonic, delay, true).is_ok());
+
+        // Same request_id and same nonce, but a different recovery recipient:
+        // the exact "swap the recipient on a captured request" attack. The
+        // machine must reject it as a replay of the original request.
+        let different_recipient = RecoveryRequest {
+            recovery_recipient_key: vec![0xEE; 1216],
+            ..original.clone()
+        };
+        prop_assert_eq!(
+            machine.begin_at(&different_recipient, digest, wall, monotonic, delay, true),
+            Err(CoreError::Replay),
+            "re-binding a captured request to a new recipient must be a replay"
+        );
+        // The pending entry still belongs to the original request: releasing
+        // requires the original digest, and any other digest is a mismatch.
+        prop_assert_eq!(
+            machine.authorize_release_at(original.request_id, [0xAB; 32], wall, monotonic, true, true),
+            Err(CoreError::RequestMismatch),
+            "recipient swap must not re-bind the pending entry to a new digest"
+        );
+        prop_assert_eq!(
+            machine.state(&original.request_id),
+            Some(RecoveryState::DelayPending)
+        );
+
+        // Same nonce with a fresh request_id is also a replay...
+        let new_id_same_nonce = request(version, [7; 32], [3; 32], requested_at.min(wall), expiry);
+        prop_assert_eq!(
+            machine.begin_at(&new_id_same_nonce, digest, wall, monotonic, delay, true),
+            Err(CoreError::Replay)
+        );
+
+        // ...but a genuinely fresh request with a fresh nonce still works.
+        let fresh = request(version, [8; 32], [6; 32], requested_at.min(wall), expiry);
+        prop_assert!(machine.begin_at(&fresh, digest, wall, monotonic, delay, true).is_ok());
+        let _ = recipient_key;
+    }
+}

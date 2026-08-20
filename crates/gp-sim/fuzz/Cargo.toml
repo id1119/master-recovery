@@ -1,0 +1,47 @@
+[package]
+name = "gp-sim-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+gp-sim = { path = ".." }
+gp-types = { path = "../../gp-types" }
+gp-wire = { path = "../../gp-wire" }
+gp-crypto = { path = "../../gp-crypto" }
+
+[[bin]]
+name = "deserialize_requests"
+path = "fuzz_targets/deserialize_requests.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "validate_begin"
+path = "fuzz_targets/validate_begin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "validate_release"
+path = "fuzz_targets/validate_release.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "validate_contribution"
+path = "fuzz_targets/validate_contribution.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

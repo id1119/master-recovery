@@ -23,6 +23,9 @@ zeroize.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 hex.workspace = true
+hkdf.workspace = true
+rand_core10.workspace = true
+sha2.workspace = true
 proptest = "1"
 wycheproof = "0.6.0"
 

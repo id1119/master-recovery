@@ -22,7 +22,63 @@ allow = [
 confidence-threshold = 0.8
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
+skip = [
+    # Intentional: ed25519-dalek 2.2.0 and frost-ristretto255 3.0.0 are still on
+    # curve25519-dalek 4; x-wing's x25519-dalek 3.0.0 requires curve25519-dalek 5.
+    # No single version can satisfy both dependency families yet.
+    { name = "curve25519-dalek", version = "4.1.3" },
+    # Intentional: ml-kem 0.3.2 (ML-KEM-768 in x-wing) pins sha3 0.11 while
+    # x-wing itself builds against sha3 0.12.
+    { name = "sha3", version = "0.11.0" },
+    # Intentional: blahaj 0.6.0 (noise protocol) pins rand 0.8; the workspace
+    # uses rand 0.9 directly. rand 0.10.2 in the lockfile is unreachable.
+    { name = "rand", version = "0.8.7" },
+    # Intentional: the rand 0.8/rand_core 0.6 ecosystem (blahaj, ed25519-dalek,
+    # frost-ristretto255, chacha20poly1305) pins getrandom 0.2; rand 0.9 pulls
+    # getrandom 0.3 (kept), and the ml-kem/sha3 0.11 path pulls getrandom 0.4.
+    { name = "getrandom", version = "0.2.17" },
+    { name = "getrandom", version = "0.4.3" },
+    # Intentional: KAT compatibility vectors in gp-crypto are generated against
+    # rand_chacha 0.3 and 0.10; the workspace's live RNG is rand_chacha 0.9
+    # (kept) via rand 0.9.
+    { name = "rand_chacha", version = "0.3.1" },
+    { name = "rand_chacha", version = "0.10.0" },
+    # Collateral of the rand 0.8 / getrandom 0.2 ecosystem above: rand_core 0.6
+    # is pinned by blahaj, ed25519-dalek, frost-ristretto255 and curve25519-dalek 4.
+    { name = "rand_core", version = "0.6.4" },
+    # Collateral of the KAT rand_chacha 0.10 path: rand_core 0.10 rides in via
+    # the ml-kem/crypto-common 0.2 subtree.
+    { name = "rand_core", version = "0.10.1" },
+    # Collateral of the sha3 0.11 / curve25519-dalek 4 split: digest 0.10 is
+    # pinned by ml-kem (sha3 0.11) and curve25519-dalek 4; digest 0.11 (kept)
+    # rides in via sha3 0.12.
+    { name = "digest", version = "0.10.7" },
+    # Collateral of the digest 0.10/0.11 split above.
+    { name = "block-buffer", version = "0.10.4" },
+    # Collateral of the chacha20 0.9 / aead 0.5 split: crypto-common 0.1 is
+    # pinned by chacha20poly1305 0.10.1; crypto-common 0.2 (kept) rides in via
+    # digest 0.11.
+    { name = "crypto-common", version = "0.1.7" },
+    # Collateral of the RustCrypto 0.2-era stack: cpufeatures 0.2 is pinned by
+    # chacha20 0.9 and sha2 0.10; cpufeatures 0.3 (kept) is required by
+    # curve25519-dalek 5.
+    { name = "cpufeatures", version = "0.2.17" },
+    # Collateral of the curve25519-dalek 4/5 split: dalek 4 pins the fiat-crypto
+    # 0.2 codegen backend; dalek 5 (kept) requires fiat-crypto 0.3.
+    { name = "fiat-crypto", version = "0.2.9" },
+    # Collateral of the proc-macro ecosystem transition: syn 2 is pinned by
+    # curve25519-dalek-derive and other pre-syn-3 derive crates; clap_derive
+    # 4.6.4 and serde_derive 1.0.229 already build against syn 3 (kept).
+    { name = "syn", version = "2.0.119" },
+    # Collateral (target-gated to Windows): windows-sys 0.52 is pinned by
+    # ring 0.17.14 (rustls crypto provider); rustix 1.x and anstream tooling
+    # require windows-sys 0.61 (kept).
+    { name = "windows-sys", version = "0.52.0" },
+    # Collateral of the getrandom 0.3/0.4 split: r-efi 5.3 rides in via
+    # getrandom 0.3.4, r-efi 6.0 (kept) via getrandom 0.4.3.
+    { name = "r-efi", version = "5.3.0" },
+]
 
 [sources]
 unknown-registry = "deny"
