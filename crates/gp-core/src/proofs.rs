@@ -32,6 +32,26 @@ fn any_event() -> RecoveryEvent {
     }
 }
 
+/// A 32-byte id drawn from a small symbolic domain.
+///
+/// Every property below depends only on whether two ids are *equal*, never on
+/// their internal structure: `seen`/`seen_nonces` membership, the
+/// `retry.request_id == request.request_id` assumption, and the digest
+/// comparisons. A fully symbolic `[u8; 32]` therefore costs 256 bits of state
+/// per id for no extra coverage, and the `BTreeMap`/`BTreeSet` lookups compare
+/// them lexicographically byte by byte, which is what made these harnesses
+/// intractable (the Kani job hit the 6 hour CI ceiling).
+///
+/// Four distinguishable ids keep every equal/not-equal case reachable,
+/// including collisions between a request and its retry. The reduction is a
+/// modelling choice: these proofs cover all *relations* between ids, not all
+/// 2^256 byte patterns.
+fn any_id() -> Id32 {
+    let tag: u8 = kani::any();
+    kani::assume(tag < 4);
+    [tag; 32]
+}
+
 fn any_machine() -> RecoveryMachine {
     RecoveryMachine {
         state: any_state(),
@@ -43,12 +63,14 @@ fn any_request() -> RecoveryRequest {
     RecoveryRequest {
         protocol_version: kani::any(),
         crypto_suite: CryptoSuite::default(),
-        config_id: kani::any(),
+        config_id: any_id(),
         config_version: kani::any(),
-        request_id: kani::any(),
-        recovery_recipient_key: kani::any::<[u8; 32]>().to_vec(),
+        request_id: any_id(),
+        // Not compared by any property here; only its presence matters, so a
+        // concrete key keeps the recipient out of the symbolic state.
+        recovery_recipient_key: [0u8; 32].to_vec(),
         requested_at: kani::any(),
-        nonce: kani::any(),
+        nonce: any_id(),
         expiry: kani::any(),
     }
 }
@@ -195,7 +217,7 @@ fn expiry_reached_expires_from_any_state() {
 
 #[kani::proof]
 fn validate_request_never_panics() {
-    let machine = GuardianMachine::new(kani::any(), kani::any());
+    let machine = GuardianMachine::new(any_id(), kani::any());
     let request = any_request();
     let _ = machine.validate_request(&request);
 }
@@ -203,9 +225,9 @@ fn validate_request_never_panics() {
 #[kani::proof]
 fn validate_request_passes_implies_registered() {
     let request = any_request();
-    let mut machine = GuardianMachine::new(kani::any(), kani::any());
+    let mut machine = GuardianMachine::new(any_id(), kani::any());
     kani::assume(machine.validate_request(&request).is_ok());
-    let digest: Id32 = kani::any();
+    let digest: Id32 = any_id();
     let wall_now: u64 = kani::any();
     let delay: u64 = kani::any();
     let certificate_valid: bool = kani::any();
@@ -238,9 +260,9 @@ fn validate_request_passes_implies_registered() {
 
 #[kani::proof]
 fn cancelled_requests_are_fail_closed() {
-    let mut machine = GuardianMachine::new(kani::any(), kani::any());
+    let mut machine = GuardianMachine::new(any_id(), kani::any());
     let request = any_request();
-    let digest: Id32 = kani::any();
+    let digest: Id32 = any_id();
     let wall_now: u64 = kani::any();
     let delay: u64 = kani::any();
     let certificate_valid: bool = kani::any();

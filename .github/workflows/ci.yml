@@ -338,6 +338,10 @@ jobs:
   kani:
     name: Kani model checks
     runs-on: ubuntu-latest
+    # Without a bound an intractable harness runs until the 6 hour GitHub
+    # ceiling, so a hang costs a whole runner-day and reports as a timeout
+    # rather than as a proof that needs bounding.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
