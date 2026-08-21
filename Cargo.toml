@@ -51,7 +51,7 @@ zeroize = { version = "1.8", features = ["derive", "serde"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(kani_unbounded)'] }
 
 [workspace.lints.clippy]
 all = "warn"
