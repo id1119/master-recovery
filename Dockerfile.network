@@ -5,11 +5,12 @@ COPY crates ./crates
 RUN cargo build --release -p gp-network --locked
 
 FROM debian:bookworm-slim
-# Pins must name versions that exist in bookworm; refresh them when Debian
-# publishes a security update or the image build fails on this line.
+# ca-certificates comes from bookworm-security, not the base bookworm
+# archive, so its version does not appear in the plain bookworm suite.
+# Refresh both pins when Debian publishes a security update.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates=20230311+deb12u1 curl=7.88.1-10+deb12u15 \
+        ca-certificates=20250419~deb12u1 curl=7.88.1-10+deb12u15 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/gp-network /usr/local/bin/gp-network
 ENTRYPOINT ["gp-network"]
