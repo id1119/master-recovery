@@ -204,7 +204,7 @@ proptest! {
         pending_count in 0_usize..=4,
     ) {
         let config_ref = config_ref(config_id, payload_generation, authorization_epoch, guardian_epoch, epoch_binding);
-        let mut store = GuardianEpochStore::new(record_v3(config_ref.clone(), 9), capsule_hash);
+        let mut store = GuardianEpochStore::new(record_v3(config_ref, 9), capsule_hash);
 
         store.dpss_journal = Some(DpssSessionJournal {
             rotation_id,
@@ -240,7 +240,7 @@ proptest! {
         store.draining.insert(
             guardian_epoch,
             DrainingGuardianEpoch {
-                record: record_v3(config_ref.clone(), 10),
+                record: record_v3(config_ref, 10),
                 capsule_hash,
                 drain_deadline,
                 pending_request_ids: pending,
@@ -249,7 +249,7 @@ proptest! {
         store.prepared = Some(PreparedGuardianEpoch {
             rotation_id,
             plan_hash,
-            record: record_v3(config_ref.clone(), 11),
+            record: record_v3(config_ref, 11),
             durable_write_generation,
         });
         roundtrip_json(&store);
@@ -280,7 +280,7 @@ proptest! {
             RotationIntent {
                 context: RotationContext {
                     protocol_version: PROTOCOL_VERSION_V3,
-                    config_ref: config_ref.clone(),
+                    config_ref,
                     rotation_id,
                     predecessor_capsule_hash: capsule_hash,
                     recipient_key: vec![1; 32],

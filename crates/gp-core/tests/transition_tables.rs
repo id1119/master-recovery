@@ -45,7 +45,9 @@ fn build(from: RecoveryState) -> RecoveryMachine {
             machine
                 .apply(RecoveryEvent::ApprovalThresholdReached, 1, DELAY)
                 .unwrap();
-            machine.apply(RecoveryEvent::BeginAccepted, 2, DELAY).unwrap();
+            machine
+                .apply(RecoveryEvent::BeginAccepted, 2, DELAY)
+                .unwrap();
         }
         RecoveryState::Releasing => {
             machine
@@ -54,7 +56,9 @@ fn build(from: RecoveryState) -> RecoveryMachine {
             machine
                 .apply(RecoveryEvent::ApprovalThresholdReached, 1, DELAY)
                 .unwrap();
-            machine.apply(RecoveryEvent::BeginAccepted, 2, DELAY).unwrap();
+            machine
+                .apply(RecoveryEvent::BeginAccepted, 2, DELAY)
+                .unwrap();
             machine
                 .apply(RecoveryEvent::ReleaseCertificateReady, 13, DELAY)
                 .unwrap();
@@ -66,7 +70,9 @@ fn build(from: RecoveryState) -> RecoveryMachine {
             machine
                 .apply(RecoveryEvent::ApprovalThresholdReached, 1, DELAY)
                 .unwrap();
-            machine.apply(RecoveryEvent::BeginAccepted, 2, DELAY).unwrap();
+            machine
+                .apply(RecoveryEvent::BeginAccepted, 2, DELAY)
+                .unwrap();
             machine
                 .apply(RecoveryEvent::ReleaseCertificateReady, 13, DELAY)
                 .unwrap();
@@ -83,7 +89,9 @@ fn build(from: RecoveryState) -> RecoveryMachine {
                 .unwrap();
         }
         RecoveryState::Expired => {
-            machine.apply(RecoveryEvent::ExpiryReached, 0, DELAY).unwrap();
+            machine
+                .apply(RecoveryEvent::ExpiryReached, 0, DELAY)
+                .unwrap();
         }
     }
     assert_eq!(machine.state(), from, "builder for {from:?} is broken");
@@ -536,27 +544,38 @@ fn assert_guardian_invariants(machine: &mut GuardianMachine, observed: &[[u8; 32
             None => {}
             Some(RecoveryState::Cancelled) => {
                 assert!(
-                    machine.authorize_release_at(*request_id, [0; 32], 0, 0, true, true).is_err(),
+                    machine
+                        .authorize_release_at(*request_id, [0; 32], 0, 0, true, true)
+                        .is_err(),
                     "a cancelled request must never authorize release"
                 );
             }
             Some(RecoveryState::Expired) => {
                 assert!(
-                    machine.authorize_release_at(*request_id, [0; 32], 0, 0, true, true).is_err(),
+                    machine
+                        .authorize_release_at(*request_id, [0; 32], 0, 0, true, true)
+                        .is_err(),
                     "an expired request must never authorize release"
                 );
             }
             Some(RecoveryState::DelayPending | RecoveryState::Releasing) => {
                 assert!(
-                    machine.authorize_release_at(*request_id, [0; 32], 0, 0, true, true).is_err(),
+                    machine
+                        .authorize_release_at(*request_id, [0; 32], 0, 0, true, true)
+                        .is_err(),
                     "a live request must never release under a wrong digest"
                 );
             }
-            Some(RecoveryState::Created
-            | RecoveryState::AwaitingApprovals
-            | RecoveryState::Authorized
-            | RecoveryState::Completed) => {
-                panic!("guardian bookkeeping must never report {request_id:?} as {:#?}", machine.state(request_id));
+            Some(
+                RecoveryState::Created
+                | RecoveryState::AwaitingApprovals
+                | RecoveryState::Authorized
+                | RecoveryState::Completed,
+            ) => {
+                panic!(
+                    "guardian bookkeeping must never report {request_id:?} as {:#?}",
+                    machine.state(request_id)
+                );
             }
         }
     }
@@ -642,19 +661,13 @@ fn guardian_scenario_keeps_try_state_invariants_after_every_mutation() {
         machine.authorize_release(observed[1], digest_b, 20, true, true),
         Ok(())
     );
-    assert_eq!(
-        machine.state(&observed[1]),
-        Some(RecoveryState::Releasing)
-    );
+    assert_eq!(machine.state(&observed[1]), Some(RecoveryState::Releasing));
     assert_eq!(
         machine.authorize_release(observed[1], digest_b, 20, true, true),
         Ok(()),
         "releasing a request that is already Releasing must stay idempotent"
     );
-    assert_eq!(
-        machine.state(&observed[1]),
-        Some(RecoveryState::Releasing)
-    );
+    assert_eq!(machine.state(&observed[1]), Some(RecoveryState::Releasing));
     assert_guardian_invariants(&mut machine, &observed);
 
     // Request C: expiry crossing moves the pending entry to Expired and the
@@ -678,14 +691,8 @@ fn guardian_scenario_keeps_try_state_invariants_after_every_mutation() {
     );
 
     // Cross-request isolation after the whole scenario.
-    assert_eq!(
-        machine.state(&observed[0]),
-        Some(RecoveryState::Cancelled)
-    );
-    assert_eq!(
-        machine.state(&observed[1]),
-        Some(RecoveryState::Releasing)
-    );
+    assert_eq!(machine.state(&observed[0]), Some(RecoveryState::Cancelled));
+    assert_eq!(machine.state(&observed[1]), Some(RecoveryState::Releasing));
     assert_eq!(machine.state(&observed[2]), Some(RecoveryState::Expired));
     assert_guardian_invariants(&mut machine, &observed);
 }

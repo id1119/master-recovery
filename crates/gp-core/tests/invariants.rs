@@ -33,7 +33,12 @@ impl Model {
         }
     }
 
-    fn step(&mut self, event: &RecoveryEvent, now: u64, delay: u64) -> Result<Vec<Action>, CoreError> {
+    fn step(
+        &mut self,
+        event: &RecoveryEvent,
+        now: u64,
+        delay: u64,
+    ) -> Result<Vec<Action>, CoreError> {
         match self.state {
             ModelState::Terminal(state) => {
                 let err = if state == RecoveryState::Cancelled {
@@ -49,13 +54,15 @@ impl Model {
                         RecoveryState::AwaitingApprovals,
                         vec![Action::RequestSignerApprovals],
                     ),
-                    (RecoveryState::AwaitingApprovals, RecoveryEvent::ApprovalThresholdReached) => (
-                        RecoveryState::Authorized,
-                        vec![
-                            Action::DecryptRecoveryDescriptor,
-                            Action::SendBeginCertificate,
-                        ],
-                    ),
+                    (RecoveryState::AwaitingApprovals, RecoveryEvent::ApprovalThresholdReached) => {
+                        (
+                            RecoveryState::Authorized,
+                            vec![
+                                Action::DecryptRecoveryDescriptor,
+                                Action::SendBeginCertificate,
+                            ],
+                        )
+                    }
                     (RecoveryState::AwaitingApprovals, RecoveryEvent::OwnerCancelObserved)
                     | (RecoveryState::Authorized, RecoveryEvent::OwnerCancelObserved)
                     | (RecoveryState::DelayPending, RecoveryEvent::OwnerCancelObserved) => (
@@ -76,7 +83,10 @@ impl Model {
                         if now < self.not_before.unwrap_or(u64::MAX) {
                             return Err(CoreError::InvalidTransition { from });
                         }
-                        (RecoveryState::Releasing, vec![Action::RequestGuardianContributions])
+                        (
+                            RecoveryState::Releasing,
+                            vec![Action::RequestGuardianContributions],
+                        )
                     }
                     (RecoveryState::Releasing, RecoveryEvent::GuardianThresholdReached) => (
                         RecoveryState::Completed,

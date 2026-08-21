@@ -1065,12 +1065,10 @@ mod tests {
     #[test]
     fn successive_aead_calls_never_reuse_a_nonce_under_the_same_key() {
         let key = [0x51; 32];
-        let mut nonce_counter = 0_u64;
         let mut nonce = [0_u8; 24];
         let mut prior: Option<AeadCiphertext> = None;
-        for message in 0_u8..32 {
-            nonce[..8].copy_from_slice(&nonce_counter.to_be_bytes());
-            nonce_counter += 1;
+        for (nonce_counter, message) in (0_u8..32).enumerate() {
+            nonce[..8].copy_from_slice(&(nonce_counter as u64).to_be_bytes());
             let sealed = aead_encrypt(&key, nonce, &[message], b"hot path").unwrap();
             if let Some(prior) = &prior {
                 assert_ne!(sealed.nonce, prior.nonce);

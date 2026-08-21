@@ -483,7 +483,7 @@ mod tests {
         machine.apply(RecoveryEvent::RequestCreated, 0, 10).unwrap();
         machine.apply(RecoveryEvent::ExpiryReached, 1, 10).unwrap();
         assert_eq!(machine.state(), RecoveryState::Expired);
-        for event in vec![
+        for event in [
             RecoveryEvent::RequestCreated,
             RecoveryEvent::ApprovalThresholdReached,
             RecoveryEvent::BeginAccepted,
@@ -505,7 +505,7 @@ mod tests {
             .apply(RecoveryEvent::OwnerCancelObserved, 1, 10)
             .unwrap();
         assert_eq!(machine.state(), RecoveryState::Cancelled);
-        for event in vec![
+        for event in [
             RecoveryEvent::BeginAccepted,
             RecoveryEvent::ReleaseCertificateReady,
             RecoveryEvent::GuardianThresholdReached,

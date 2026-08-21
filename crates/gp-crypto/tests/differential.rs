@@ -23,8 +23,8 @@ use gp_crypto::{
 use gp_types::ConfigRef;
 use hmac::{Hmac, Mac, digest::KeyInit};
 use ring::hkdf::{HKDF_SHA256, Salt};
-use ring::signature::{Ed25519KeyPair as RingKeyPair, UnparsedPublicKey, ED25519};
 use ring::signature::KeyPair as RingKeyPairTrait;
+use ring::signature::{ED25519, Ed25519KeyPair as RingKeyPair, UnparsedPublicKey};
 use sha2::Sha256;
 
 /// A representative signed transcript. Byte-level binding of real transcripts
@@ -58,17 +58,37 @@ fn ring_sign(seed: &[u8; 32], message: &[u8]) -> Vec<u8> {
     Vec::from(pair.sign(message).as_ref())
 }
 
-fn ring_verify(public_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), ring::error::Unspecified> {
+fn ring_verify(
+    public_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), ring::error::Unspecified> {
     UnparsedPublicKey::new(&ED25519, public_key).verify(message, signature)
 }
 
 #[test]
 fn ed25519_three_implementations_derive_identical_public_keys() {
-    let seeds = [[0x42; 32], [0x13; 32], [0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f]];
+    let seeds = [
+        [0x42; 32],
+        [0x13; 32],
+        [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+            0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+            0x1c, 0x1d, 0x1e, 0x1f,
+        ],
+    ];
     for seed in seeds {
         let dalek = verifying_key_bytes(&signing_key(seed));
-        assert_eq!(compact_public_key(&seed), dalek, "ed25519-compact disagrees on key derivation");
-        assert_eq!(ring_public_key(&seed), dalek, "ring disagrees on key derivation");
+        assert_eq!(
+            compact_public_key(&seed),
+            dalek,
+            "ed25519-compact disagrees on key derivation"
+        );
+        assert_eq!(
+            ring_public_key(&seed),
+            dalek,
+            "ring disagrees on key derivation"
+        );
     }
 }
 
@@ -143,7 +163,10 @@ fn hkdf_reference(ikm: &[u8], info: &[u8]) -> [u8; 32] {
 fn hkdf_ring(ikm: &[u8], info: &[u8]) -> [u8; 32] {
     let prk = Salt::new(HKDF_SHA256, &[0_u8; 32]).extract(ikm);
     let mut out = [0_u8; 32];
-    prk.expand(&[info], HKDF_SHA256).unwrap().fill(&mut out).unwrap();
+    prk.expand(&[info], HKDF_SHA256)
+        .unwrap()
+        .fill(&mut out)
+        .unwrap();
     out
 }
 
@@ -175,7 +198,13 @@ fn protocol_kdf_paths_pin_to_independent_reference() {
     info.extend_from_slice(&guardian_index.to_be_bytes());
     let expected = hkdf_reference(&authorization_key, &info);
     assert_eq!(
-        guardian_share_key(&authorization_key, &config_id, config_version, guardian_index).unwrap(),
+        guardian_share_key(
+            &authorization_key,
+            &config_id,
+            config_version,
+            guardian_index
+        )
+        .unwrap(),
         expected
     );
 
@@ -183,7 +212,10 @@ fn protocol_kdf_paths_pin_to_independent_reference() {
     info.extend_from_slice(&config_id);
     info.extend_from_slice(&config_version.to_be_bytes());
     let expected = hkdf_reference(&authorization_key, &info);
-    assert_eq!(descriptor_key(&authorization_key, &config_id, config_version).unwrap(), expected);
+    assert_eq!(
+        descriptor_key(&authorization_key, &config_id, config_version).unwrap(),
+        expected
+    );
 
     let config_ref = ConfigRef {
         config_id,

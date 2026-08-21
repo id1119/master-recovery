@@ -321,7 +321,7 @@ mod tests {
 
             assert!(summary.fixed_outer_format);
             assert!(!summary.trivially_isolatable);
-            assert!(packets.len() > 0);
+            assert!(!packets.is_empty());
             assert!(summary.cover_packets > 0, "cover traffic must be present");
 
             // The outer fields an observer can read are structurally identical

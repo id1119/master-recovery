@@ -230,7 +230,7 @@ proptest! {
         roundtrip(&RotationPlan {
             context: context.clone(),
             intent_hash,
-            predecessor: context.config_ref.clone(),
+            predecessor: context.config_ref,
             successor,
             old_roster: old_roster.clone(),
             new_roster: new_roster.clone(),
@@ -243,7 +243,7 @@ proptest! {
             dpss_suite: DpssSuiteId::default(),
             dpss_session_id,
             dpss_qualified_set_commitment: qualified_set_commitment,
-            minimum_delay_secs: minimum_delay_secs,
+            minimum_delay_secs,
             preparation_deadline,
             drain_deadline,
         });
@@ -571,7 +571,7 @@ proptest! {
         });
 
         roundtrip(&GuardianHealthRecord {
-            config_ref: context.config_ref.clone(),
+            config_ref: context.config_ref,
             guardian_index: signer_id,
             state: GuardianHealthState::Healthy,
             consecutive_failures,
@@ -625,7 +625,7 @@ proptest! {
         let config_ref = config_ref(config_id, payload_generation, authorization_epoch, guardian_epoch, epoch_binding);
         let request = RecoveryRequestV3 {
             protocol_version: PROTOCOL_VERSION_V3,
-            config_ref: config_ref.clone(),
+            config_ref,
             request_id,
             recovery_recipient_key: recipient_key.clone(),
             requested_at,
@@ -688,7 +688,7 @@ proptest! {
         });
 
         roundtrip(&OwnerRecoveryCancelAckV3 {
-            config_ref: config_ref.clone(),
+            config_ref,
             request_id,
             request_digest: capsule_hash,
             cancel_certificate_hash: capsule_hash,
@@ -697,7 +697,7 @@ proptest! {
         });
 
         roundtrip(&GuardianRecoveryContributionV3 {
-            config_ref: config_ref.clone(),
+            config_ref,
             request_id,
             request_digest: capsule_hash,
             recovery_recipient_key: recipient_key.clone(),
@@ -711,7 +711,7 @@ proptest! {
         });
 
         roundtrip(&RecoveryDescriptorV3 {
-            config_ref: config_ref.clone(),
+            config_ref,
             guardians: routes(config_id, 4, routes_len),
             guardian_material_root,
             data_shards,
@@ -725,7 +725,7 @@ proptest! {
 
         roundtrip(&ConfigCapsuleV3 {
             protocol_version: PROTOCOL_VERSION_V3,
-            config_ref: config_ref.clone(),
+            config_ref,
             capsule_hash,
             predecessor_capsule_hash,
             signer_count,
@@ -760,13 +760,13 @@ proptest! {
             relay_bases: vec!["relay-1".to_string()],
         });
 
-        roundtrip(&policy_v3(config_ref.clone(), 7));
+        roundtrip(&policy_v3(config_ref, 7));
 
-        roundtrip(&record_v3(config_ref.clone(), 8));
+        roundtrip(&record_v3(config_ref, 8));
 
         roundtrip(&CustodyChallenge {
             protocol_version: PROTOCOL_VERSION_V3,
-            config_ref: config_ref.clone(),
+            config_ref,
             opaque_slot_id,
             challenge_id,
             block_indices: block_indices.clone(),
@@ -785,7 +785,7 @@ proptest! {
             .collect();
         roundtrip(&CustodyResponse {
             protocol_version: PROTOCOL_VERSION_V3,
-            config_ref: config_ref.clone(),
+            config_ref,
             opaque_slot_id,
             challenge_id,
             nonce,

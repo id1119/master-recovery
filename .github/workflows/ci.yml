@@ -87,9 +87,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@889fac408b4da0905346410f253f0c55fbcb6613 # 1.97.0 (branch)
-      - uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2
-        with:
-          tool: cargo-machete
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - run: cargo install cargo-machete --locked
       - run: cargo machete
 
   semver:
@@ -201,6 +200,7 @@ jobs:
 
   scorecard:
     name: OpenSSF Scorecard
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       security-events: write
@@ -354,12 +354,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2
-        with:
-          tool: actionlint@1.7.12
-      - uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2
-        with:
-          tool: zizmor@1.29.0
+      - uses: dtolnay/rust-toolchain@889fac408b4da0905346410f253f0c55fbcb6613 # 1.97.0 (branch)
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+      - name: Install actionlint
+        run: |
+          curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz | tar xz
+          sudo mv actionlint /usr/local/bin/actionlint
+          actionlint --version
+      - name: Install zizmor
+        run: cargo install zizmor --locked --version 1.29.0
       - run: actionlint
       - run: zizmor .github/workflows/
 
