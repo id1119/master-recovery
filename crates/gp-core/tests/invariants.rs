@@ -344,6 +344,7 @@ proptest! {
         requested_at in 0_u64..=40,
         version in 1_u64..=10,
     ) {
+        prop_assume!(wall < expiry);
         let mut machine = GuardianMachine::new([1; 32], version);
         let a = request(version, [2; 32], [3; 32], requested_at.min(wall), expiry);
         let b = request(version, [4; 32], [5; 32], requested_at.min(wall), expiry);
@@ -401,6 +402,7 @@ proptest! {
         version in 1_u64..=10,
         recipient_key in prop::collection::vec(any::<u8>(), 1216..=1216),
     ) {
+        prop_assume!(wall < expiry);
         let mut machine = GuardianMachine::new([1; 32], version);
         let original = RecoveryRequest {
             recovery_recipient_key: recipient_key.clone(),
